@@ -1,13 +1,37 @@
-node_modules
+# Dependencies and build output
+node_modules/
+dist/
+desktop/dist/
+desktop/out/
+desktop/release/
 
-.vscode/
-
+# Git and CI metadata
 .git/
-.github/
 .gitignore
 
-dist/
+# Local/runtime state
+.env
+.env.*
+!.env.example
+*.log
+.eslintcache
+.omx/
+.claude-plugin/
+.vscode/
+.idea/
+data/
+copilot-data/
+
+# Tests and docs not needed in runtime image
+coverage/
 tests/
+docs/
 *.md
 
-.eslintcache
+# Desktop/plugin development artifacts
+plugin/
+desktop/node_modules/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
