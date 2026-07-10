@@ -111,6 +111,11 @@ beforeEach(async () => {
   messagesApiFlowDependencies.createChatCompletions = createChatCompletions
   messagesApiFlowDependencies.createMessages = createMessages
   messagesApiFlowDependencies.createResponses = createResponses
+  responsesUtilsDependencies.getModelResponsesApiCompactThreshold = () =>
+    undefined
+  responsesUtilsDependencies.isContextManagementEnabledForMessages = () => true
+  responsesUtilsDependencies.isContextManagementEnabledForResponses = () =>
+    false
   responsesUtilsDependencies.isResponsesApiWebSocketEnabled = () =>
     responsesApiWebSocketEnabled
   createChatCompletions.mockClear()
@@ -125,7 +130,7 @@ afterEach(async () => {
   Reflect.deleteProperty(process.env, DB_PATH_ENV)
 })
 
-test("messages Chat Completions flow adds Copilot cache control to system and latest two non-system messages", async () => {
+test("messages Chat Completions flow adds Copilot cache control to system and latest non-system message", async () => {
   const payload: AnthropicMessagesPayload = {
     model: "gpt-test",
     max_tokens: 128,
@@ -187,9 +192,6 @@ test("messages Chat Completions flow adds Copilot cache control to system and la
     {
       role: "user",
       content: "latest user",
-      copilot_cache_control: {
-        type: "ephemeral",
-      },
     },
     {
       role: "assistant",
@@ -283,7 +285,7 @@ test("messages Chat Completions flow omits reasoning effort without model suppor
   expect(capturedPayload).not.toHaveProperty("reasoning_effort")
 })
 
-test("Copilot Chat Completions payload preparation marks two system and latest two non-system messages", () => {
+test("Copilot Chat Completions payload preparation marks two system and latest non-system message", () => {
   const payload: ChatCompletionsPayload = {
     model: "gpt-test",
     messages: [
@@ -329,9 +331,6 @@ test("Copilot Chat Completions payload preparation marks two system and latest t
     {
       role: "user",
       content: "latest user",
-      copilot_cache_control: {
-        type: "ephemeral",
-      },
     },
     {
       role: "assistant",
@@ -510,6 +509,29 @@ test("messages Responses flow uses websocket transport by default for dual-endpo
   expect(response.status).toBe(200)
   expect(createResponses).toHaveBeenCalledTimes(1)
   expect(capturedResponsesOptions?.transport).toBe("websocket")
+})
+
+test("messages Responses flow adds context management by default", async () => {
+  const payload: AnthropicMessagesPayload = {
+    max_tokens: 128,
+    messages: [{ role: "user", content: "hello" }],
+    model: "gpt-test",
+  }
+
+  const response = await handleWithResponsesApi(createContext(), payload, {
+    logger,
+    requestId: "request-1",
+    selectedModel: createModel(["/responses"]),
+  })
+
+  expect(response.status).toBe(200)
+  expect(createResponses).toHaveBeenCalledTimes(1)
+  expect(capturedResponsesPayload?.context_management).toEqual([
+    {
+      type: "compaction",
+      compact_threshold: 108800,
+    },
+  ])
 })
 
 test("messages Responses flow keeps HTTP transport for dual-endpoint models when websocket is disabled", async () => {

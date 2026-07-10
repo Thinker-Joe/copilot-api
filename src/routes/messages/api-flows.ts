@@ -66,7 +66,7 @@ import {
 } from "./stream-translation"
 
 const COPILOT_CONTEXT_CACHE_SYSTEM_MARKER_LIMIT = 2
-const COPILOT_CONTEXT_CACHE_NON_SYSTEM_MARKER_LIMIT = 2
+const COPILOT_CONTEXT_CACHE_NON_SYSTEM_MARKER_LIMIT = 1
 const COPILOT_CONTEXT_CACHE_CONTROL = {
   type: "ephemeral",
 } as const
@@ -221,12 +221,17 @@ export const handleWithResponsesApi = async (
     payload: anthropicPayload,
   })
 
-  applyResponsesApiContextManagement(
+  const shouldCompactInput = applyResponsesApiContextManagement(
     responsesPayload,
     selectedModel?.capabilities.limits.max_prompt_tokens,
+    {
+      source: "messages",
+    },
   )
 
-  compactInputByLatestCompaction(responsesPayload)
+  if (shouldCompactInput) {
+    compactInputByLatestCompaction(responsesPayload)
+  }
 
   debugJson(logger, "Translated Responses payload:", responsesPayload)
 

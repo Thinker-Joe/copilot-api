@@ -13,11 +13,11 @@ export interface AppConfig {
   modelMappings?: Record<string, string>
   extraPrompts?: Record<string, string>
   smallModel?: string
-  useResponsesApiContextManagement?: boolean
+  contextManagement?: ContextManagementConfig
   modelResponsesApiCompactThresholds?: Record<string, number>
   modelReasoningEfforts?: Record<
     string,
-    "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+    "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
   >
   useMessagesApi?: boolean
   useResponsesApiWebSocket?: boolean
@@ -31,6 +31,11 @@ export interface AppConfig {
   // Mixing web_search with other tools is not supported.
   messageApiWebSearchModel?: string
   claudeTokenMultiplier?: number
+}
+
+export interface ContextManagementConfig {
+  messages?: boolean
+  responses?: boolean
 }
 
 export interface ModelConfig {
@@ -87,6 +92,24 @@ export interface ResolvedProviderConfig {
   models?: Record<string, ModelConfig>
 }
 
+const GPT_MODEL_PATTERN = /^gpt-(\d+)(?:\.(\d+))?/
+
+function isGpt53OrAbove(model: string): boolean {
+  const match = GPT_MODEL_PATTERN.exec(model)
+  if (!match) {
+    return false
+  }
+  const majorVersion = Number.parseInt(match[1], 10)
+  if (majorVersion > 5) {
+    return true
+  }
+  if (majorVersion !== 5) {
+    return false
+  }
+  const minorVersion = match[2] ? Number.parseInt(match[2], 10) : 0
+  return minorVersion >= 3
+}
+
 const gpt5ExplorationPrompt = `## Exploration and reading files
 - **Think first.** Before any tool call, decide ALL files/resources you will need.
 - **Batch everything.** If you need multiple files (even from different places), read them together.
@@ -119,6 +142,11 @@ const modelResponsesApiCompactThresholds = {
   "gpt-5.5": 272_000 * 0.8,
 }
 
+const defaultContextManagement = {
+  messages: true,
+  responses: false,
+} satisfies Required<ContextManagementConfig>
+
 const defaultConfig: AppConfig = {
   auth: {
     apiKeys: [],
@@ -127,20 +155,12 @@ const defaultConfig: AppConfig = {
   modelMappings: {},
   extraPrompts: {
     "gpt-5-mini": gpt5ExplorationPrompt,
-    "gpt-5.3-codex": gpt5CommentaryPrompt,
-    "gpt-5.4-mini": gpt5CommentaryPrompt,
-    "gpt-5.4": gpt5CommentaryPrompt,
-    "gpt-5.5": gpt5CommentaryPrompt,
   },
   smallModel: "gpt-5-mini",
-  useResponsesApiContextManagement: true,
+  contextManagement: defaultContextManagement,
   modelResponsesApiCompactThresholds,
   modelReasoningEfforts: {
     "gpt-5-mini": "low",
-    "gpt-5.3-codex": "xhigh",
-    "gpt-5.4-mini": "xhigh",
-    "gpt-5.4": "xhigh",
-    "gpt-5.5": "xhigh",
   },
   useMessagesApi: true,
   useResponsesApiWebSocket: true,
@@ -255,6 +275,10 @@ function mergeDefaultConfig(config: AppConfig): {
     defaultConfig.modelResponsesApiCompactThresholds ?? {}
   const modelReasoningEfforts = config.modelReasoningEfforts ?? {}
   const defaultModelReasoningEfforts = defaultConfig.modelReasoningEfforts ?? {}
+  const contextManagement = normalizeContextManagementConfig(
+    config.contextManagement,
+  )
+  const defaultContextManagementConfig = defaultConfig.contextManagement ?? {}
 
   const missingExtraPromptModels = Object.keys(defaultExtraPrompts).filter(
     (model) => !Object.hasOwn(extraPrompts, model),
@@ -266,16 +290,21 @@ function mergeDefaultConfig(config: AppConfig): {
   const missingResponsesApiCompactThresholdModels = Object.keys(
     defaultResponsesApiCompactThresholds,
   ).filter((model) => !Object.hasOwn(responsesApiCompactThresholds, model))
+  const missingContextManagementKeys = Object.keys(
+    defaultContextManagementConfig,
+  ).filter((key) => !Object.hasOwn(contextManagement, key))
 
   const hasExtraPromptChanges = missingExtraPromptModels.length > 0
   const hasReasoningEffortChanges = missingReasoningEffortModels.length > 0
   const hasResponsesApiCompactThresholdChanges =
     missingResponsesApiCompactThresholdModels.length > 0
+  const hasContextManagementChanges = missingContextManagementKeys.length > 0
 
   if (
     !hasExtraPromptChanges
     && !hasReasoningEffortChanges
     && !hasResponsesApiCompactThresholdChanges
+    && !hasContextManagementChanges
   ) {
     return { mergedConfig: config, changed: false }
   }
@@ -283,6 +312,10 @@ function mergeDefaultConfig(config: AppConfig): {
   return {
     mergedConfig: {
       ...config,
+      contextManagement: {
+        ...defaultContextManagementConfig,
+        ...contextManagement,
+      },
       extraPrompts: {
         ...defaultExtraPrompts,
         ...extraPrompts,
@@ -297,6 +330,23 @@ function mergeDefaultConfig(config: AppConfig): {
       },
     },
     changed: true,
+  }
+}
+
+function normalizeContextManagementConfig(
+  value: ContextManagementConfig | undefined,
+): ContextManagementConfig {
+  if (!value || typeof value !== "object") {
+    return {}
+  }
+
+  return {
+    ...(typeof value.messages === "boolean" ?
+      { messages: value.messages }
+    : {}),
+    ...(typeof value.responses === "boolean" ?
+      { responses: value.responses }
+    : {}),
   }
 }
 
@@ -373,7 +423,11 @@ export function reloadConfig(): AppConfig {
 
 export function getExtraPromptForModel(model: string): string {
   const config = getConfig()
-  return config.extraPrompts?.[model] ?? ""
+  const userPrompt = config.extraPrompts?.[model]
+  if (userPrompt !== undefined) {
+    return userPrompt
+  }
+  return isGpt53OrAbove(model) ? gpt5CommentaryPrompt : ""
 }
 
 export function getModelMappings(): Record<string, string> {
@@ -436,9 +490,16 @@ export function getSmallModel(): string {
   return config.smallModel ?? "gpt-5-mini"
 }
 
-export function isResponsesApiContextManagementEnabled(): boolean {
+export function isContextManagementEnabledForMessages(): boolean {
   const config = getConfig()
-  return config.useResponsesApiContextManagement ?? true
+  return config.contextManagement?.messages ?? defaultContextManagement.messages
+}
+
+export function isContextManagementEnabledForResponses(): boolean {
+  const config = getConfig()
+  return (
+    config.contextManagement?.responses ?? defaultContextManagement.responses
+  )
 }
 
 export function getModelResponsesApiCompactThreshold(
@@ -460,9 +521,13 @@ export function getModelResponsesApiCompactThreshold(
 
 export function getReasoningEffortForModel(
   model: string,
-): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" {
+): "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
   const config = getConfig()
-  return config.modelReasoningEfforts?.[model] ?? "high"
+  const userEffort = config.modelReasoningEfforts?.[model]
+  if (userEffort !== undefined) {
+    return userEffort
+  }
+  return isGpt53OrAbove(model) ? "xhigh" : "high"
 }
 
 export function normalizeProviderBaseUrl(url: string): string {

@@ -364,7 +364,7 @@ describe("openai-compatible provider messages", () => {
 })
 
 describe("openai-compatible provider context cache", () => {
-  test("marks first system and last two non-system messages for OpenAI-compatible context cache", async () => {
+  test("marks first system and last non-system message for OpenAI-compatible context cache", async () => {
     const app = createApp()
     const response = await app.request("/dash/v1/messages", {
       method: "POST",
@@ -401,7 +401,7 @@ describe("openai-compatible provider context cache", () => {
         ),
     )
 
-    expect(markedMessages).toHaveLength(3)
+    expect(markedMessages).toHaveLength(2)
     expect(body.messages[0]).toEqual({
       role: "system",
       content: [
@@ -428,15 +428,7 @@ describe("openai-compatible provider context cache", () => {
     })
     expect(body.messages[4]).toEqual({
       role: "assistant",
-      content: [
-        {
-          type: "text",
-          text: "second answer",
-          cache_control: {
-            type: "ephemeral",
-          },
-        },
-      ],
+      content: "second answer",
     })
     expect(body.messages[5]).toEqual({
       role: "user",
@@ -801,15 +793,7 @@ describe("openai-compatible provider PDF message content", () => {
     expect(body.messages[0]).toEqual({
       role: "tool",
       tool_call_id: "tool_pdf",
-      content: [
-        {
-          type: "text",
-          text: "PDF file read: report.pdf",
-          cache_control: {
-            type: "ephemeral",
-          },
-        },
-      ],
+      content: "PDF file read: report.pdf",
     })
     expect(body.messages[1]).toEqual({
       role: "user",
@@ -1026,5 +1010,99 @@ describe("non-dashscope openai-compatible provider restrictions", () => {
     const init = fetchMock.mock.calls[0][1] as RequestInit
     const body = JSON.parse(init.body as string) as Record<string, unknown>
     expect(body.thinking_budget).toBe(4096)
+  })
+})
+
+describe("dashscope preserve_thinking default", () => {
+  test("defaults preserve_thinking to true for dashscope when not set", async () => {
+    providerConfig = {
+      ...providerConfig,
+      models: {
+        "qwen-plus": {
+          toolContentSupportType: [],
+        },
+      },
+    } as ResolvedProviderConfig
+
+    const app = createApp()
+    const response = await app.request("/dash/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "qwen-plus",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    expect(body.preserve_thinking).toBe(true)
+  })
+
+  test("keeps explicit preserve_thinking false from extraBody", async () => {
+    providerConfig = {
+      ...providerConfig,
+      models: {
+        "qwen-plus": {
+          extraBody: {
+            preserve_thinking: false,
+          },
+          toolContentSupportType: [],
+        },
+      },
+    } as ResolvedProviderConfig
+
+    const app = createApp()
+    const response = await app.request("/dash/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "qwen-plus",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    expect(body.preserve_thinking).toBe(false)
+  })
+
+  test("does not set preserve_thinking for non-dashscope providers", async () => {
+    providerConfig = {
+      ...providerConfig,
+      name: "custom",
+      baseUrl: "https://api.example.com/v1",
+      models: {
+        "qwen-plus": {
+          toolContentSupportType: [],
+        },
+      },
+    } as ResolvedProviderConfig
+
+    const app = createApp()
+    const response = await app.request("/custom/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "qwen-plus",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as Record<string, unknown>
+    expect(body).not.toHaveProperty("preserve_thinking")
   })
 })

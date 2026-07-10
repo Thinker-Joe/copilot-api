@@ -62,6 +62,49 @@ const STRIPPED_CODEX_REQUEST_HEADERS = new Set([
 
 const STRIPPED_CODEX_WEBSOCKET_HEADERS = new Set(["accept", "content-type"])
 
+const shouldForwardCodexRequestHeader = (headerName: string): boolean => {
+  const headerNameLower = headerName.toLowerCase()
+  return (
+    !STRIPPED_CODEX_REQUEST_HEADERS.has(headerNameLower)
+    && !headerNameLower.includes("trace")
+    && !headerNameLower.startsWith("cf-")
+  )
+}
+
+const buildForwardedCodexRequestHeaders = (
+  requestHeaders: Headers,
+): Headers => {
+  const headers = new Headers()
+  for (const [headerName, headerValue] of requestHeaders) {
+    if (shouldForwardCodexRequestHeader(headerName)) {
+      headers.set(headerName, headerValue)
+    }
+  }
+  return headers
+}
+
+const setDefaultCodexHeader = (
+  headers: Headers,
+  headerName: string,
+  headerValue: string,
+): void => {
+  if (!headers.has(headerName)) {
+    headers.set(headerName, headerValue)
+  }
+}
+
+const applyOpencodeCodexHeaders = (headers: Headers): void => {
+  if (!headers.get("user-agent")?.startsWith("opencode")) {
+    return
+  }
+
+  headers.set("originator", "opencode")
+  const sessionId = requestContext.getStore()?.sessionAffinity
+  if (sessionId) {
+    headers.set("session-id", sessionId)
+  }
+}
+
 const requireCodexAuthContext = (): {
   accessToken: string
   accountId: string
@@ -103,50 +146,26 @@ export function buildCodexResponsesHeaders(
   requestHeaders: Headers,
   options: CodexResponsesHeaderOptions = {},
 ): Headers {
-  const { accessToken, accountId } = requireCodexAuthContext()
-  const headers = new Headers()
-  for (const [headerName, headerValue] of requestHeaders) {
-    const headerNameLower = headerName.toLowerCase()
-    if (STRIPPED_CODEX_REQUEST_HEADERS.has(headerNameLower)) {
-      continue
-    }
-    if (headerNameLower.includes("trace")) {
-      continue
-    }
-    if (headerNameLower.startsWith("cf-")) {
-      continue
-    }
-    headers.set(headerName, headerValue)
-  }
+  const headers = buildCodexRequestHeaders(requestHeaders)
 
-  if (!headers.has("accept")) {
-    headers.set(
-      "accept",
-      options.stream ? "text/event-stream" : "application/json",
-    )
-  }
+  setDefaultCodexHeader(
+    headers,
+    "accept",
+    options.stream ? "text/event-stream" : "application/json",
+  )
+  setDefaultCodexHeader(headers, "content-type", "application/json")
+  return headers
+}
+
+export function buildCodexRequestHeaders(requestHeaders: Headers): Headers {
+  const { accessToken, accountId } = requireCodexAuthContext()
+  const headers = buildForwardedCodexRequestHeaders(requestHeaders)
 
   headers.set("authorization", `Bearer ${accessToken}`)
   headers.set("chatgpt-account-id", accountId)
-  if (!headers.has("content-type")) {
-    headers.set("content-type", "application/json")
-  }
-  if (!headers.has("OpenAI-Beta")) {
-    headers.set("OpenAI-Beta", "responses=experimental")
-  }
-  if (!headers.has("originator")) {
-    headers.set("originator", "copilot-api")
-  }
-  if (!headers.has("user-agent")) {
-    headers.set("user-agent", "copilot-api")
-  }
-  if (headers.get("user-agent")?.startsWith("opencode")) {
-    headers.set("originator", "opencode")
-    const sessionId = requestContext.getStore()?.sessionAffinity
-    if (sessionId) {
-      headers.set("session-id", sessionId)
-    }
-  }
+  setDefaultCodexHeader(headers, "originator", "copilot-api")
+  setDefaultCodexHeader(headers, "user-agent", "copilot-api")
+  applyOpencodeCodexHeaders(headers)
   return headers
 }
 
@@ -163,6 +182,11 @@ export function buildCodexResponsesWebSocketHeaders(
   requestHeaders: Headers,
 ): Record<string, string> {
   const headers = buildCodexResponsesHeaders(requestHeaders)
+  setDefaultCodexHeader(
+    headers,
+    "openai-beta",
+    "responses_websockets=2026-02-06",
+  )
   for (const headerName of STRIPPED_CODEX_WEBSOCKET_HEADERS) {
     headers.delete(headerName)
   }
@@ -457,6 +481,7 @@ const createCodexResponsesWebSocketStreamChunk = (
     }
 
     if (parsed.type === "error" && parsed.error) {
+      consola.warn("Codex responses websocket stream error:", parsed.error)
       parsed.message = parsed.error.message
     }
 

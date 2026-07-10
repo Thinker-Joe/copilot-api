@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 
+import { requestContext } from "~/lib/request-context"
 import { state } from "~/lib/state"
 import { getModels } from "~/services/codex/get-models"
 import {
@@ -139,10 +140,39 @@ describe("codex api helpers", () => {
 
     expect(headers.get("authorization")).toBe("Bearer codex-token")
     expect(headers.get("chatgpt-account-id")).toBe("codex-account")
+    expect(headers.get("accept")).toBe("application/json")
     expect(headers.get("content-type")).toBe("application/json")
-    expect(headers.get("openai-beta")).toBe("responses=experimental")
     expect(headers.get("originator")).toBe("copilot-api")
     expect(headers.get("user-agent")).toBe("copilot-api")
+  })
+
+  test("sets streaming and opencode-specific codex headers", () => {
+    state.codexAccessToken = "codex-token"
+    state.codexAccountId = "codex-account"
+
+    const headers = requestContext.run(
+      {
+        parentSessionId: undefined,
+        sessionAffinity: "opencode-session",
+        startTime: Date.now(),
+        traceId: "trace-123",
+        userAgent: "opencode",
+      },
+      () =>
+        buildCodexResponsesHeaders(
+          new Headers({
+            "cf-ray": "cloudflare-ray",
+            "user-agent": "opencode/1.0",
+          }),
+          { stream: true },
+        ),
+    )
+
+    expect(headers.get("accept")).toBe("text/event-stream")
+    expect(headers.get("cf-ray")).toBeNull()
+    expect(headers.get("openai-beta")).toBeNull()
+    expect(headers.get("originator")).toBe("opencode")
+    expect(headers.get("session-id")).toBe("opencode-session")
   })
 
   test("prepares websocket requests without HTTP-only headers", () => {
@@ -171,6 +201,9 @@ describe("codex api helpers", () => {
     expect(request.headers.accept).toBeUndefined()
     expect(request.headers["content-type"]).toBeUndefined()
     expect(request.headers.authorization).toBe("Bearer codex-token")
+    expect(request.headers["openai-beta"]).toBe(
+      "responses_websockets=2026-02-06",
+    )
   })
 
   test("returns the static codex model catalog", () => {
@@ -182,6 +215,9 @@ describe("codex api helpers", () => {
       "gpt-5.4",
       "gpt-5.4-mini",
       "gpt-5.5",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
     ])
     expect(
       models.data.every(
