@@ -110,6 +110,22 @@ function isGpt53OrAbove(model: string): boolean {
   return minorVersion >= 3
 }
 
+export function isGpt56OrAbove(model: string): boolean {
+  const match = GPT_MODEL_PATTERN.exec(model)
+  if (!match) {
+    return false
+  }
+  const majorVersion = Number.parseInt(match[1], 10)
+  if (majorVersion > 5) {
+    return true
+  }
+  if (majorVersion !== 5) {
+    return false
+  }
+  const minorVersion = match[2] ? Number.parseInt(match[2], 10) : 0
+  return minorVersion >= 6
+}
+
 const gpt5ExplorationPrompt = `## Exploration and reading files
 - **Think first.** Before any tool call, decide ALL files/resources you will need.
 - **Batch everything.** If you need multiple files (even from different places), read them together.
@@ -140,6 +156,9 @@ You interact with the user through a terminal. You have 2 ways of communicating 
 const modelResponsesApiCompactThresholds = {
   "gpt-5.4": 272_000 * 0.8,
   "gpt-5.5": 272_000 * 0.8,
+  "gpt-5.6-sol": 272_000 * 0.85,
+  "gpt-5.6-terra": 272_000 * 0.85,
+  "gpt-5.6-luna": 272_000 * 0.85,
 }
 
 const defaultContextManagement = {
