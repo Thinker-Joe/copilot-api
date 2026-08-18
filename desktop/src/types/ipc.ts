@@ -26,7 +26,7 @@ export type ProviderType =
 export type ProviderAuthType = 'authorization' | 'x-api-key'
 export type ProviderAuthTypeInput = ProviderAuthType | '__default__'
 export type QuickProviderName =
-  'opencode-go' | 'deepseek' | 'dashscope' | 'openrouter'
+  'opencode-go' | 'kimi' | 'deepseek' | 'dashscope' | 'openrouter'
 
 export type ProviderAuthInput =
   | {
@@ -54,6 +54,17 @@ export interface ServerAuthInfo {
   enabled: boolean
   headerName?: string
   headerValue?: string
+}
+
+export interface ServerKeysConfig {
+  apiKeys: string[]
+  adminApiKey: string
+}
+
+export interface ServerKeysConfigUpdate {
+  apiKeys?: string[]
+  // undefined = leave the field untouched, '' or null = remove the admin key
+  adminApiKey?: string | null
 }
 
 export interface ModelMappingsConfig {
@@ -215,6 +226,10 @@ declare global {
         pageSize: number,
       ) => Promise<unknown>
       getServerAuthInfo: () => Promise<ServerAuthInfo>
+      getServerKeys: () => Promise<ServerKeysConfig>
+      saveServerKeys: (
+        keys: ServerKeysConfigUpdate,
+      ) => Promise<ServerKeysConfig>
       getLogs: () => Promise<string[]>
       onAuthSuccess: (callback: (result: AuthResult) => void) => () => void
       onServerStatus: (callback: (status: ServerStatus) => void) => () => void

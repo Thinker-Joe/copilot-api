@@ -1,16 +1,17 @@
 import { describe, test, expect } from "bun:test"
 import { z } from "zod"
 
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
-import type { Model } from "~/services/copilot/get-models"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
+import type { Model } from "~/lib/types/models"
 
-import { COMPACT_REQUEST } from "../src/lib/compact"
-import { state } from "../src/lib/state"
+import { COMPACT_REQUEST } from "~/lib/compact"
+import { requestContext } from "~/lib/request-context"
+import { state } from "~/lib/state"
 import {
   RICH_TOOL_RESULT_MOVED_TEXT,
   translateToOpenAI,
-} from "../src/routes/messages/non-stream-translation"
-import { getCompactType } from "../src/routes/messages/preprocess"
+} from "~/routes/messages/non-stream-translation"
+import { getCompactType } from "~/routes/messages/preprocess"
 
 // Zod schema for a single message in the chat completion request.
 const messageSchema = z.object({
@@ -109,6 +110,48 @@ function createThinkingModel(): Model {
 }
 
 describe("Anthropic to OpenAI translation logic", () => {
+  test("maps request session affinity to prompt_cache_key", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello!" }],
+      max_tokens: 0,
+    }
+
+    const openAIPayload = requestContext.run(
+      {
+        parentSessionId: undefined,
+        sessionAffinity: " opencode-session ",
+        startTime: Date.now(),
+        traceId: "trace-123",
+        userAgent: "test",
+      },
+      () => translateToOpenAI(anthropicPayload),
+    )
+
+    expect(openAIPayload.prompt_cache_key).toBe("opencode-session")
+  })
+
+  test("omits prompt_cache_key when request session affinity is blank", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "Hello!" }],
+      max_tokens: 0,
+    }
+
+    const openAIPayload = requestContext.run(
+      {
+        parentSessionId: undefined,
+        sessionAffinity: "   ",
+        startTime: Date.now(),
+        traceId: "trace-123",
+        userAgent: "test",
+      },
+      () => translateToOpenAI(anthropicPayload),
+    )
+
+    expect(openAIPayload).not.toHaveProperty("prompt_cache_key")
+  })
+
   test("should translate minimal Anthropic payload to valid OpenAI payload", () => {
     const anthropicPayload: AnthropicMessagesPayload = {
       model: "gpt-4o",
@@ -141,12 +184,40 @@ describe("Anthropic to OpenAI translation logic", () => {
           name: "getWeather",
           description: "Gets weather info",
           input_schema: { location: { type: "string" } },
+          strict: true,
         },
       ],
       tool_choice: { type: "auto" },
     }
     const openAIPayload = translateToOpenAI(anthropicPayload)
+    expect(openAIPayload.tools?.[0]?.function.strict).toBe(true)
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
+  })
+
+  test("maps inline Anthropic system messages to OpenAI user messages", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [
+        { role: "user", content: "Hello!" },
+        { role: "system", content: "Follow the repo style." },
+        {
+          role: "system",
+          content: [{ type: "text", text: "Keep the change focused." }],
+        },
+      ],
+      max_tokens: 128,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Hello!" },
+      { role: "user", content: "Follow the repo style." },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Keep the change focused." }],
+      },
+    ])
   })
 
   test("maps non-empty output_config effort to reasoning_effort", () => {
@@ -223,6 +294,26 @@ describe("Anthropic to OpenAI translation logic", () => {
     const openAIPayload = translateToOpenAI(anthropicPayload)
     // Should fail validation
     expect(isValidChatCompletionRequest(openAIPayload)).toBe(false)
+  })
+
+  test("should skip assistant messages with empty content array", () => {
+    const anthropicPayload: AnthropicMessagesPayload = {
+      model: "gpt-4o",
+      messages: [
+        { role: "user", content: "Hello!" },
+        { role: "assistant", content: [] },
+        { role: "user", content: "Are you there?" },
+      ],
+      max_tokens: 100,
+    }
+
+    const openAIPayload = translateToOpenAI(anthropicPayload)
+
+    expect(openAIPayload.messages).toEqual([
+      { role: "user", content: "Hello!" },
+      { role: "user", content: "Are you there?" },
+    ])
+    expect(isValidChatCompletionRequest(openAIPayload)).toBe(true)
   })
 
   test("should handle thinking blocks in assistant messages", () => {

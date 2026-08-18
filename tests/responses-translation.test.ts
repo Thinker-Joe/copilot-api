@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test"
 
 import { requestContext } from "~/lib/request-context"
 import { createMcpToolSearchSentinel } from "~/lib/tool-search"
-import type { AnthropicMessagesPayload } from "~/routes/messages/anthropic-types"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 import type {
   ResponseFunctionCallOutputItem,
   ResponseInputMessage,
@@ -10,7 +10,7 @@ import type {
   ResponseToolSearchCallItem,
   ResponseToolSearchOutputItem,
   ResponsesResult,
-} from "~/services/copilot/create-responses"
+} from "~/lib/types/responses"
 
 import {
   REASONING_SUMMARY_SEPARATOR,
@@ -103,6 +103,11 @@ const translateThinking = (thinking: string): ResponseInputReasoning => {
 }
 
 describe("translateAnthropicMessagesToResponsesPayload", () => {
+  it("keeps empty summaries compatible with legacy Thinking markers", () => {
+    expect(translateThinking("").summary).toEqual([])
+    expect(translateThinking("Thinking...").summary).toEqual([])
+  })
+
   it("restores marked summary boundaries and preserves unmarked history", () => {
     const firstSummary =
       "**Preparing to search online**\n\nI need to use web.run."
@@ -264,6 +269,45 @@ describe("translateAnthropicMessagesToResponsesPayload", () => {
 
     expect(result.instructions).toContain("ordinary system prompt")
     expect(result.instructions).not.toContain("cch=<stable>;")
+  })
+
+  it("translates inline system messages to developer items", () => {
+    const result = translateAnthropicMessagesToResponsesPayload({
+      model: "gpt-5.4",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "system",
+          content: "leading system prompt",
+        },
+        {
+          role: "user",
+          content: "hello",
+        },
+        {
+          role: "system",
+          content: "late system prompt",
+        },
+      ],
+    })
+
+    expect(result.input).toEqual([
+      {
+        type: "message",
+        role: "developer",
+        content: "leading system prompt",
+      },
+      {
+        type: "message",
+        role: "user",
+        content: "hello",
+      },
+      {
+        type: "message",
+        role: "developer",
+        content: "late system prompt",
+      },
+    ])
   })
 
   it("ignores blank subagent agent_id", () => {
@@ -448,6 +492,7 @@ describe("translateAnthropicMessagesToResponsesPayload", () => {
         {
           name: "Read",
           description: "Read a file",
+          strict: true,
           input_schema: {
             type: "object",
             properties: {
@@ -536,7 +581,7 @@ describe("translateAnthropicMessagesToResponsesPayload", () => {
           },
           required: ["file_path"],
         },
-        strict: false,
+        strict: true,
       },
     ])
   })

@@ -46,7 +46,7 @@ import {
   type Tool,
   type ToolChoiceFunction,
   type ToolChoiceOptions,
-} from "~/services/copilot/create-responses"
+} from "~/lib/types/responses"
 
 import {
   type AnthropicAssistantContentBlock,
@@ -54,8 +54,9 @@ import {
   type AnthropicDocumentBlock,
   type AnthropicResponse,
   type AnthropicImageBlock,
-  type AnthropicMessage,
+  type AnthropicInputMessage,
   type AnthropicMessagesPayload,
+  type AnthropicSystemMessage,
   type AnthropicTextBlock,
   type AnthropicThinkingBlock,
   type AnthropicTool,
@@ -64,14 +65,14 @@ import {
   type AnthropicToolUseBlock,
   type AnthropicUserContentBlock,
   type AnthropicUserMessage,
-} from "./anthropic-types"
-import { normalizeToolSchema } from "./non-stream-translation"
+} from "~/lib/types/anthropic"
+import { normalizeToolSchema, THINKING_TEXT } from "./non-stream-translation"
 
 const MESSAGE_TYPE = "message"
 const COMPACTION_SIGNATURE_PREFIX = "cm1#"
 const COMPACTION_SIGNATURE_SEPARATOR = "@"
 
-export const THINKING_TEXT = "Thinking..."
+export { THINKING_TEXT }
 export const REASONING_SUMMARY_SEPARATOR = "\u00A0\n\n"
 const REASONING_SUMMARY_SEPARATOR_PATTERN = /\u00a0\n\n|\u2063\n\n/
 
@@ -110,7 +111,7 @@ export const translateAnthropicMessagesToResponsesPayload = (
     toolUseNameById: new Map(),
   }
 
-  for (const message of payload.messages as Array<AnthropicMessage>) {
+  for (const message of payload.messages) {
     input.push(
       ...translateMessage(message, payload.model, applyPhase, translationState),
     )
@@ -214,7 +215,7 @@ export const decodeCompactionCarrierSignature = (
 }
 
 const translateMessage = (
-  message: AnthropicMessage,
+  message: AnthropicInputMessage,
   model: string,
   applyPhase: boolean,
   state: TranslationState,
@@ -223,7 +224,22 @@ const translateMessage = (
     return translateUserMessage(message, state)
   }
 
+  if (message.role === "system") {
+    return translateSystemMessage(message)
+  }
+
   return translateAssistantMessage(message, model, applyPhase, state)
+}
+
+const translateSystemMessage = (
+  message: AnthropicSystemMessage,
+): Array<ResponseInputItem> => {
+  if (typeof message.content === "string") {
+    return [createMessage("developer", message.content)]
+  }
+
+  const content = message.content.map((block) => createTextContent(block.text))
+  return content.length > 0 ? [createMessage("developer", content)] : []
 }
 
 const translateUserMessage = (
@@ -757,7 +773,7 @@ const convertToolToFunction = (tool: AnthropicTool): Tool => ({
   type: "function",
   name: tool.name,
   parameters: normalizeToolSchema(tool.input_schema),
-  strict: false,
+  strict: tool.strict ?? false,
   ...(tool.description ? { description: tool.description } : {}),
 })
 
@@ -770,7 +786,7 @@ const convertDeferredToolToNamespace = (tool: AnthropicTool): Tool => ({
       type: "function",
       name: tool.name,
       parameters: normalizeToolSchema(tool.input_schema),
-      strict: false,
+      strict: tool.strict ?? false,
       defer_loading: true,
       ...(tool.description ? { description: tool.description } : {}),
     },
@@ -853,7 +869,7 @@ const mapOutputToAnthropicContent = (
     switch (item.type) {
       case "reasoning": {
         const thinkingText = extractReasoningText(item)
-        if (thinkingText.length > 0) {
+        if (thinkingText.length > 0 || (item.id && item.encrypted_content)) {
           contentBlocks.push({
             type: "thinking",
             thinking: thinkingText,
@@ -961,11 +977,6 @@ const extractReasoningText = (item: ResponseOutputReasoning): string => {
     }
   }
 
-  // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
-  if (!item.summary || item.summary.length === 0) {
-    return THINKING_TEXT
-  }
-
   collectFromBlocks(item.summary)
 
   return segments.join(REASONING_SUMMARY_SEPARATOR).trim()
@@ -1026,7 +1037,7 @@ const createCompactionThinkingBlock = (
 
   return {
     type: "thinking",
-    thinking: THINKING_TEXT,
+    thinking: "",
     signature: encodeCompactionCarrierSignature({
       id: item.id,
       encrypted_content: item.encrypted_content,

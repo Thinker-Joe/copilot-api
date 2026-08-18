@@ -16,6 +16,7 @@ export interface Locale {
     providerDashscope: string
     providerDeepseek: string
     providerInvalid: string
+    providerKimi: string
     providerName: string
     providerOpencodeGo: string
     providerOpenrouter: string
@@ -147,6 +148,13 @@ export interface Locale {
     autoStartServerDesc: string
     minimizeToTray: string
     minimizeToTrayDesc: string
+    sectionSecurity: string
+    serverKeysNote: string
+    apiKeysLabel: string
+    apiKeysDesc: string
+    adminKeyLabel: string
+    adminKeyPlaceholder: string
+    adminKeyDesc: string
     sectionNetwork: string
     proxySystemNote: string
     proxyMode: string

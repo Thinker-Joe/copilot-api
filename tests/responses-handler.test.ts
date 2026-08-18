@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 
-import type { createResponses as createCopilotResponses } from "../src/services/copilot/create-responses"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
+import type { CompletionPayloadOptions } from "~/routes/messages/handler"
+import type { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
 
 let responsesApiWebSocketEnabled = true
 
@@ -28,22 +30,24 @@ const createResponsesResult = (model: string) => ({
   usage: null,
 })
 
-const { state } = await import("../src/lib/state")
-const { closeUsageStore } = await import("../src/lib/token-usage")
-const { tokenUsageRoute } = await import("../src/routes/token-usage/route")
+const { state } = await import("~/lib/state")
+const { closeUsageStore } = await import("~/lib/token-usage")
+const { tokenUsageRoute } = await import("~/routes/token-usage/route")
 const { responsesHandlerDependencies } = await import(
-  "../src/routes/responses/handler"
+  "~/routes/responses/handler"
 )
-const { responsesRoutes } = await import("../src/routes/responses/route")
-const { responsesUtilsDependencies } = await import(
-  "../src/routes/responses/utils"
+const { responsesMessagesDependencies } = await import(
+  "~/routes/responses/messages-handler"
 )
-const { generateRequestIdFromPayload, getUUID } = await import(
-  "../src/lib/utils"
-)
+const { responsesRoutes } = await import("~/routes/responses/route")
+const { responsesUtilsDependencies } = await import("~/routes/responses/utils")
+const { generateRequestIdFromPayload, getUUID } = await import("~/lib/utils")
 
 const defaultResponsesHandlerDependencies = {
   ...responsesHandlerDependencies,
+}
+const defaultResponsesMessagesDependencies = {
+  ...responsesMessagesDependencies,
 }
 const defaultResponsesUtilsDependencies = { ...responsesUtilsDependencies }
 
@@ -102,7 +106,10 @@ beforeEach(async () => {
 
   responsesApiWebSocketEnabled = true
   responsesHandlerDependencies.createResponses = createResponses
+  responsesHandlerDependencies.findEndpointModel = (model) =>
+    state.models?.data.find((candidate) => candidate.id === model)
   responsesHandlerDependencies.isResponsesApiWebSearchEnabled = () => true
+  responsesHandlerDependencies.resolveMappedModel = (model) => model
   responsesUtilsDependencies.getModelResponsesApiCompactThreshold = () =>
     undefined
   responsesUtilsDependencies.isContextManagementEnabledForMessages = () => true
@@ -129,10 +136,446 @@ afterEach(async () => {
     responsesHandlerDependencies,
     defaultResponsesHandlerDependencies,
   )
+  Object.assign(
+    responsesMessagesDependencies,
+    defaultResponsesMessagesDependencies,
+  )
   Object.assign(responsesUtilsDependencies, defaultResponsesUtilsDependencies)
 })
 
 describe("responses handler token usage", () => {
+  test("routes a Messages-only Copilot model through the Responses Lite adapter", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-test",
+          model_picker_enabled: true,
+          name: "Claude Test",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/v1/messages"],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          Response.json({
+            content: [
+              {
+                type: "tool_use",
+                id: "call-patch",
+                name: "apply_patch",
+                input: { input: "*** Begin Patch" },
+              },
+            ],
+            id: "msg-lite",
+            model: "claude-test",
+            role: "assistant",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            type: "message",
+            usage: { input_tokens: 8, output_tokens: 4 },
+          }),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-test",
+        input: [
+          {
+            role: "developer",
+            type: "additional_tools",
+            tools: [{ type: "custom", name: "apply_patch" }],
+          },
+          { role: "user", type: "message", content: "Patch it" },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).not.toHaveBeenCalled()
+    expect(handleMessages).toHaveBeenCalledTimes(1)
+    expect(handleMessages.mock.calls[0]?.[1].tools?.[0]?.name).toBe(
+      "apply_patch",
+    )
+    const body = (await response.json()) as { output: Array<unknown> }
+    expect(body.output[0]).toEqual(
+      expect.objectContaining({
+        type: "custom_tool_call",
+        call_id: "call-patch",
+        name: "apply_patch",
+        input: "*** Begin Patch",
+      }),
+    )
+  })
+
+  test("forwards session, request, and subagent context to the Messages adapter", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-test",
+          model_picker_enabled: true,
+          name: "Claude Test",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/v1/messages"],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (
+        _context: Context,
+        _payload: AnthropicMessagesPayload,
+        _options?: CompletionPayloadOptions,
+      ) =>
+        Promise.resolve(
+          Response.json({
+            content: [{ type: "text", text: "hi" }],
+            id: "msg-context",
+            model: "claude-test",
+            role: "assistant",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            type: "message",
+            usage: { input_tokens: 4, output_tokens: 2 },
+          }),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const payload = {
+      input: [{ content: "Patch it", role: "user", type: "message" }],
+      model: "claude-test",
+    }
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify(payload),
+      headers: {
+        "content-type": "application/json",
+        "session-id": "root-session",
+        "thread-id": "child-thread",
+        "x-openai-subagent": "collab_spawn",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(handleMessages).toHaveBeenCalledTimes(1)
+
+    const dispatchOptions = handleMessages.mock.calls[0]?.[2]
+    const expectedSessionId = getUUID("root-session")
+    expect(dispatchOptions?.sessionId).toBe(expectedSessionId)
+    expect(dispatchOptions?.requestId).toBe(
+      generateRequestIdFromPayload(
+        { messages: payload.input },
+        expectedSessionId,
+      ),
+    )
+    expect(dispatchOptions?.subagentMarker).toEqual({
+      agent_id: "child-thread",
+      agent_type: "collab_spawn",
+      session_id: "child-thread",
+    })
+  })
+
+  test("rejects gpt-prefixed models without Responses endpoint support for Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "gpt",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "gpt-messages-only",
+          model_picker_enabled: true,
+          name: "GPT Messages Only",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/v1/messages", "/chat/completions"],
+          vendor: "openai",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(Response.json({})),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "gpt-messages-only",
+        input: "hello",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "codex-cli/1.0.0",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(400)
+    expect(createResponses).not.toHaveBeenCalled()
+    expect(handleMessages).not.toHaveBeenCalled()
+    const body = (await response.json()) as {
+      error: { message: string; type: string }
+    }
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(body.error.message).toContain(
+      "This model does not support the responses endpoint",
+    )
+  })
+
+  test("routes codex-prefixed models through the native Responses API for Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "codex",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "codex-mini-latest",
+          model_picker_enabled: true,
+          name: "Codex Mini Latest",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/responses"],
+          vendor: "openai",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(Response.json({})),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "codex-mini-latest",
+        input: "hello",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "codex-cli/1.0.0",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(handleMessages).not.toHaveBeenCalled()
+  })
+
+  test("routes non-gpt models without fallback endpoints through the Messages adapter for Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-no-endpoints",
+          model_picker_enabled: true,
+          name: "Claude No Endpoints",
+          object: "model",
+          preview: false,
+          supported_endpoints: [],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          Response.json({
+            content: [{ type: "text", text: "hi" }],
+            id: "msg-codex",
+            model: "claude-no-endpoints",
+            role: "assistant",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            type: "message",
+            usage: { input_tokens: 4, output_tokens: 2 },
+          }),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-no-endpoints",
+        input: "hello",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "codex-cli/1.0.0",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).not.toHaveBeenCalled()
+    expect(handleMessages).toHaveBeenCalledTimes(1)
+  })
+
+  test("routes non-gpt models with native Responses support through the Messages adapter for Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-responses",
+          model_picker_enabled: true,
+          name: "Claude Responses",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/responses"],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          Response.json({
+            content: [{ type: "text", text: "hi" }],
+            id: "msg-codex-native",
+            model: "claude-responses",
+            role: "assistant",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            type: "message",
+            usage: { input_tokens: 4, output_tokens: 2 },
+          }),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-responses",
+        input: "hello",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "codex-cli/1.0.0",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).not.toHaveBeenCalled()
+    expect(handleMessages).toHaveBeenCalledTimes(1)
+  })
+
+  test("rejects models without fallback endpoints for non-Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-no-endpoints",
+          model_picker_enabled: true,
+          name: "Claude No Endpoints",
+          object: "model",
+          preview: false,
+          supported_endpoints: [],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(Response.json({})),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-no-endpoints",
+        input: "hello",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(400)
+    expect(createResponses).not.toHaveBeenCalled()
+    expect(handleMessages).not.toHaveBeenCalled()
+    const body = (await response.json()) as {
+      error: { message: string; type: string }
+    }
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(body.error.message).toContain(
+      "This model does not support the responses endpoint",
+    )
+  })
+
   test("uses websocket transport by default for dual-endpoint models", async () => {
     state.models = {
       object: "list",
@@ -229,6 +672,54 @@ describe("responses handler token usage", () => {
     expect(createResponses).toHaveBeenCalledTimes(1)
     expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
   })
+
+  for (const [transport, supportedEndpoints] of [
+    ["http", ["/responses"]],
+    ["websocket", ["/responses", "ws:/responses"]],
+  ] as const) {
+    test(`sanitizes unsupported Copilot input fields before the ${transport} transport`, async () => {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            capabilities: { limits: { max_prompt_tokens: 128000 } },
+            id: "gpt-test",
+            supported_endpoints: [...supportedEndpoints],
+          },
+        ],
+      } as typeof state.models
+      createResponses.mockImplementation((payload) =>
+        Promise.resolve(createResponsesResult(payload.model)),
+      )
+
+      const response = await createApp().request("/v1/responses", {
+        body: JSON.stringify({
+          input: [
+            {
+              content: "hello",
+              internal_chat_message_metadata_passthrough: {
+                private: "must-not-be-forwarded",
+              },
+              role: "user",
+            },
+          ],
+          model: "gpt-test",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      })
+
+      expect(response.status).toBe(200)
+      expect(createResponses).toHaveBeenCalledTimes(1)
+      expect(createResponses.mock.calls[0][1]?.transport).toBe(transport)
+      expect(createResponses.mock.calls[0][1]?.signal).toBeInstanceOf(
+        AbortSignal,
+      )
+      expect(createResponses.mock.calls[0][0].input).toEqual([
+        { content: "hello", role: "user" },
+      ])
+    })
+  }
 
   test("does not add context management to native Responses API by default", async () => {
     createResponses.mockImplementation((payload) =>
@@ -445,6 +936,47 @@ describe("responses handler token usage", () => {
     expect(response.status).toBe(200)
     expect(createResponses).toHaveBeenCalledTimes(1)
     expect(createResponses.mock.calls[0][0].tools?.[0]).toEqual(applyPatchTool)
+  })
+
+  test("fills empty namespace descriptions before forwarding to Copilot Responses", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            call_id: "call-search",
+            type: "tool_search_output",
+            tools: [
+              {
+                description: "",
+                name: "workspace",
+                tools: [],
+                type: "namespace",
+              },
+            ],
+          },
+        ],
+        model: "gpt-test",
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(
+      (
+        createResponses.mock.calls[0][0].input?.[0] as {
+          tools: Array<{ description: string }>
+        }
+      ).tools[0].description,
+    ).toBe("workspace")
   })
 
   test("disables context management for gpt-5.6 models even when responses context management is enabled", async () => {

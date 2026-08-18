@@ -2,14 +2,13 @@ import {
   type ChatCompletionChunk,
   type Choice,
   type Delta,
-} from "~/services/copilot/create-chat-completions"
+} from "~/lib/types/chat-completions"
 
 import {
   type AnthropicMessageDeltaEvent,
   type AnthropicStreamEventData,
   type AnthropicStreamState,
-} from "./anthropic-types"
-import { THINKING_TEXT } from "./non-stream-translation"
+} from "~/lib/types/anthropic"
 import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 function isToolBlockOpen(state: AnthropicStreamState): boolean {
@@ -396,7 +395,7 @@ function handleReasoningOpaque(
         index: state.contentBlockIndex,
         delta: {
           type: "thinking_delta",
-          thinking: THINKING_TEXT, // Compatible with opencode, it will filter out blocks where the thinking text is empty, so we add a default thinking text here
+          thinking: "",
         },
       },
       {

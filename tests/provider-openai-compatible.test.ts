@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { Hono } from "hono"
 
-import type { ResolvedProviderConfig } from "../src/lib/config"
+import type { ResolvedProviderConfig } from "~/lib/config"
 
-const actualConfigModule = await import("../src/lib/config")
-const actualTokenUsageModule = await import("../src/lib/token-usage")
+const actualConfigModule = await import("~/lib/config")
+const actualTokenUsageModule = await import("~/lib/token-usage")
 
 let providerConfig: ResolvedProviderConfig | null = null
 
@@ -23,7 +23,7 @@ await mock.module("~/lib/token-usage", () => ({
 }))
 
 const { providerMessageRoutes } = await import(
-  "../src/routes/provider/messages/route"
+  "~/routes/provider/messages/route"
 )
 
 const originalFetch = globalThis.fetch
@@ -188,7 +188,7 @@ describe("openai-compatible provider messages", () => {
     >
     expect(body).toMatchObject({
       enable_thinking: false,
-      max_tokens: 128,
+      max_completion_tokens: 128,
       model: "qwen-plus",
       preserve_thinking: true,
       temperature: 0.4,

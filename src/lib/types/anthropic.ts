@@ -138,6 +138,7 @@ export interface AnthropicTool {
   name: string
   description?: string
   input_schema: Record<string, unknown>
+  strict?: boolean
   defer_loading?: boolean
   cache_control?: AnthropicCacheControl | null
   // Server-side tool fields (e.g. web_search_20250305). Server tools carry a
@@ -186,6 +187,7 @@ export type AnthropicWebSearchContentBlock =
   | AnthropicWebSearchToolResultBlock
 
 export interface AnthropicUsage {
+  cost?: number
   input_tokens: number
   output_tokens: number
   cache_creation_input_tokens?: number
@@ -275,6 +277,7 @@ export interface AnthropicMessageDeltaEvent {
     stop_sequence?: string | null
   }
   usage?: {
+    cost?: number
     input_tokens?: number
     output_tokens: number
     cache_creation_input_tokens?: number

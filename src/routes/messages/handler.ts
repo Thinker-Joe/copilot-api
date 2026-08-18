@@ -1,9 +1,10 @@
 import type { Context } from "hono"
 
-import type { Model } from "~/services/copilot/get-models"
+import type { Model } from "~/lib/types/models"
 
 import { COMPACT_REQUEST } from "~/lib/compact"
 import {
+  getClaudeAutoModel,
   getSmallModel,
   isMessagesApiEnabled,
   resolveMappedModel,
@@ -12,6 +13,8 @@ import { createHandlerLogger, debugJson } from "~/lib/logger"
 import { findEndpointModel } from "~/lib/models"
 import { parseProviderModelAlias } from "~/lib/provider-model"
 import { state } from "~/lib/state"
+import type { SubagentMarker } from "~/lib/subagent"
+import type { TokenUsageEndpoint } from "~/lib/token-usage"
 import {
   generateRequestIdFromPayload,
   getRootSessionId,
@@ -20,7 +23,7 @@ import {
 import { handleProviderMessagesForProvider } from "~/routes/provider/messages/handler"
 import { getResponsesTransportForModel } from "~/routes/responses/utils"
 
-import type { AnthropicMessagesPayload } from "./anthropic-types"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 import {
   handleWithChatCompletions,
   handleWithMessagesApi,
@@ -30,6 +33,7 @@ import {
   applyLastMessageCacheControl,
   getCompactType,
   getLastMessageContentCacheControl,
+  isClaudeAutoModelRequest,
   mergeToolResultForClaude,
   normalizeSystemMessages,
   sanitizeIdeTools,
@@ -50,20 +54,56 @@ export const messagesFlowHandlers = {
 export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
 
+  return await handleCompletionPayload(c, anthropicPayload)
+}
+
+export interface CompletionPayloadOptions {
+  compactType?: ReturnType<typeof getCompactType>
+  skipClaudeAutoModel?: boolean
+  skipModelMapping?: boolean
+  skipWebSearch?: boolean
+  usageEndpoint?: TokenUsageEndpoint
+  subagentMarker?: SubagentMarker | null
+  sessionId?: string
+  requestId?: string
+}
+
+export async function handleCompletionPayload(
+  c: Context,
+  anthropicPayload: AnthropicMessagesPayload,
+  dispatchOptions: CompletionPayloadOptions = {},
+) {
   const requestedModel = anthropicPayload.model
-  anthropicPayload.model = resolveMappedModel(anthropicPayload.model)
+  if (!dispatchOptions.skipModelMapping) {
+    anthropicPayload.model = resolveMappedModel(anthropicPayload.model)
+  }
   if (anthropicPayload.model !== requestedModel) {
     consola.debug(
       `Resolved model mapping: ${requestedModel} -> ${anthropicPayload.model}`,
     )
   }
 
-  const webSearchResult = await tryHandleWebSearch(c, anthropicPayload, {
-    logger,
-    forwardToProvider: (ctx, payload, provider) =>
-      handleProviderMessagesForProvider(ctx, { payload, provider }),
-  })
-  if (webSearchResult) return webSearchResult
+  if (!dispatchOptions.skipWebSearch) {
+    const webSearchResult = await tryHandleWebSearch(c, anthropicPayload, {
+      logger,
+      forwardToProvider: (ctx, payload, provider) =>
+        handleProviderMessagesForProvider(ctx, { payload, provider }),
+    })
+    if (webSearchResult) return webSearchResult
+  }
+
+  const claudeAutoModel = getClaudeAutoModel()
+  const shouldUseClaudeAutoModel = Boolean(
+    !dispatchOptions.skipClaudeAutoModel
+      && claudeAutoModel
+      && isClaudeAutoModelRequest(anthropicPayload),
+  )
+  if (claudeAutoModel && shouldUseClaudeAutoModel) {
+    consola.debug(
+      `Claude auto model override: ${anthropicPayload.model} -> ${claudeAutoModel}`,
+    )
+    anthropicPayload.model = claudeAutoModel
+  }
 
   const providerModelAlias = parseProviderModelAlias(anthropicPayload.model)
   if (providerModelAlias) {
@@ -71,6 +111,7 @@ export async function handleCompletion(c: Context) {
     return await handleProviderMessagesForProvider(c, {
       payload: anthropicPayload,
       provider: providerModelAlias.provider,
+      usageEndpoint: dispatchOptions.usageEndpoint,
     })
   }
 
@@ -80,21 +121,25 @@ export async function handleCompletion(c: Context) {
 
   sanitizeIdeTools(anthropicPayload)
 
-  const subagentMarker = parseSubagentMarkerFromFirstUser(anthropicPayload)
+  const subagentMarker =
+    dispatchOptions.subagentMarker
+    ?? parseSubagentMarkerFromFirstUser(anthropicPayload)
   if (subagentMarker) {
     debugJson(logger, "Detected Subagent marker:", subagentMarker)
   }
 
-  let sessionId = getRootSessionId(anthropicPayload, c)
+  let sessionId =
+    dispatchOptions.sessionId ?? getRootSessionId(anthropicPayload, c)
 
   // claude code and opencode compact / auto-continue detection
-  const compactType = getCompactType(anthropicPayload)
+  const compactType =
+    dispatchOptions.compactType ?? getCompactType(anthropicPayload)
 
   // fix claude code 2.0.28+ warmup request consume premium request, forcing small model if no tools are used
   // set "CLAUDE_CODE_SUBAGENT_MODEL": "you small model" also can avoid this
   const anthropicBeta = c.req.header("anthropic-beta")
   logger.debug("Anthropic Beta header:", anthropicBeta)
-  if (!state.tokenBasedBilling) {
+  if (!state.tokenBasedBilling && !shouldUseClaudeAutoModel) {
     const tools = anthropicPayload.tools
     const noTools = !tools || tools.length === 0
     if (anthropicBeta && noTools && compactType === 0) {
@@ -125,7 +170,9 @@ export async function handleCompletion(c: Context) {
     applyLastMessageCacheControl(anthropicPayload, lastMessageCacheControl)
   }
 
-  const requestId = generateRequestIdFromPayload(anthropicPayload, sessionId)
+  const requestId =
+    dispatchOptions.requestId
+    ?? generateRequestIdFromPayload(anthropicPayload, sessionId)
   logger.debug("Generated request ID:", requestId)
 
   if (!sessionId) {
@@ -148,6 +195,7 @@ export async function handleCompletion(c: Context) {
         sessionId,
         compactType,
         logger,
+        usageEndpoint: dispatchOptions.usageEndpoint,
       },
     )
   }
@@ -163,6 +211,7 @@ export async function handleCompletion(c: Context) {
         sessionId,
         compactType,
         logger,
+        usageEndpoint: dispatchOptions.usageEndpoint,
       },
     )
   }
@@ -177,6 +226,7 @@ export async function handleCompletion(c: Context) {
       sessionId,
       compactType,
       logger,
+      usageEndpoint: dispatchOptions.usageEndpoint,
     },
   )
 }

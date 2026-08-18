@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Bun/TypeScript API gateway project. Core server and route code lives in `src/`, with shared utilities under `src/lib/`, provider integrations under `src/services/`, and HTTP routes under `src/routes/`. Tests are in `tests/` and follow the same feature names as the source modules they cover. Static web assets are in `pages/`; documentation and screenshots are in `docs/`. The Electron desktop app is isolated under `desktop/` with its own source, assets, and package files. Plugin scripts live in `plugin/` and are excluded from the root ESLint config.
+This is a Bun/TypeScript API gateway project. Core server and route code lives in `src/`, with shared utilities under `src/lib/`, API protocol contract types (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages) under `src/lib/types/`, provider integrations under `src/services/`, and HTTP routes under `src/routes/`. Tests are in `tests/` and follow the same feature names as the source modules they cover. Static web assets are in `pages/`; documentation and screenshots are in `docs/`. The Electron desktop app is isolated under `desktop/` with its own source, assets, and package files. Plugin scripts live in `plugin/` and are excluded from the root ESLint config.
 
 ## Build, Test, and Development Commands
 
@@ -18,6 +18,8 @@ This is a Bun/TypeScript API gateway project. Core server and route code lives i
 ## Coding Style & Naming Conventions
 
 Use ES modules and strict TypeScript. Prefer `~/*` imports for files under `src/`. Use `camelCase` for variables and functions, `PascalCase` for types/classes, and descriptive filenames such as `responses-stream-translation.ts`. Avoid `any`; model request, response, entity, and DTO fields from the actual source types. Formatting is enforced by ESLint plus Prettier, with semicolons disabled.
+
+Run `bun run lint --fix <files>` to format changed files with the repository's ESLint/Prettier configuration. Do not run standalone `prettier` or `bunx prettier`; they may ignore the inline repository options (including `semi: false`) and rewrite entire files with the wrong style.
 
 ## Testing Guidelines
 

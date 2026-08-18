@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 
-import type { AnthropicMessagesPayload } from "../src/routes/messages/anthropic-types"
+import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
 
-const actualConfigModule = await import("../src/lib/config")
+const actualConfigModule = await import("~/lib/config")
 
 let mockedReasoningEffort:
   | "none"
@@ -25,7 +25,7 @@ import {
   prepareMessagesApiPayload,
   sanitizeIdeTools,
   stripToolReferenceTurnBoundary,
-} from "../src/routes/messages/preprocess"
+} from "~/routes/messages/preprocess"
 
 beforeEach(() => {
   mockedReasoningEffort = "xhigh"
@@ -36,6 +36,44 @@ afterEach(() => {
 })
 
 describe("normalizeSystemMessages", () => {
+  test.each(["gpt-5.4", "codex-mini-latest"])(
+    "preserves inline system messages for %s models",
+    (model) => {
+      const payload: AnthropicMessagesPayload = {
+        model,
+        max_tokens: 128,
+        system:
+          "x-anthropic-billing-header: cc_version=2.1.158.c0c; cc_entrypoint=cli; cch=6fb32;",
+        messages: [
+          {
+            role: "user",
+            content: "hello",
+          },
+          {
+            role: "system",
+            content: "follow the repo style",
+          },
+        ],
+      }
+
+      normalizeSystemMessages(payload)
+
+      expect(payload.messages).toEqual([
+        {
+          role: "user",
+          content: "hello",
+        },
+        {
+          role: "system",
+          content: "follow the repo style",
+        },
+      ])
+      expect(payload.system).toBe(
+        "x-anthropic-billing-header: cc_version=2.1.158.c0c; cc_entrypoint=cli; cch=<stable>;",
+      )
+    },
+  )
+
   test("merges system string content into the previous message", () => {
     const payload: AnthropicMessagesPayload = {
       model: "claude-opus-4.6",
@@ -203,6 +241,56 @@ describe("normalizeSystemMessages", () => {
           {
             type: "text",
             text: "<system-reminder>\nextra reminder\n</system-reminder>",
+          },
+          {
+            type: "text",
+            text: "hello",
+          },
+        ],
+      },
+    ])
+  })
+
+  test("splits SubagentStart hook additional array block and preserves its cache boundary", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-opus-4.6",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "user",
+          content: "hello",
+        },
+        {
+          role: "system",
+          content: [
+            {
+              type: "text",
+              text: 'SubagentStart hook additional context: __SUBAGENT_MARKER__{"session_id":"sub-session","agent_id":"agent-1","agent_type":"Explore"}\n\nThe following skills are available',
+              cache_control: {
+                type: "ephemeral",
+              },
+            },
+          ],
+        },
+      ],
+    }
+
+    normalizeSystemMessages(payload)
+
+    expect(payload.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: '<system-reminder>\nSubagentStart hook additional context: __SUBAGENT_MARKER__{"session_id":"sub-session","agent_id":"agent-1","agent_type":"Explore"}\n</system-reminder>',
+          },
+          {
+            type: "text",
+            text: "<system-reminder>\nThe following skills are available\n</system-reminder>",
+            cache_control: {
+              type: "ephemeral",
+            },
           },
           {
             type: "text",
@@ -1135,6 +1223,56 @@ describe("prepareMessagesApiPayload", () => {
       display: "summarized",
     })
     expect(payload.output_config).toEqual({ effort: "xhigh" })
+  })
+
+  test("keeps signature-only thinking blocks", () => {
+    const payload: AnthropicMessagesPayload = {
+      model: "claude-opus-5",
+      max_tokens: 128,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "",
+              signature: "sig-only",
+            },
+            {
+              type: "text",
+              text: "Visible text",
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: "hello",
+        },
+      ],
+    }
+
+    prepareMessagesApiPayload(payload, {
+      capabilities: {
+        supports: {
+          adaptive_thinking: true,
+        },
+      },
+    } as never)
+
+    expect(payload.messages[0]).toEqual({
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "",
+          signature: "sig-only",
+        },
+        {
+          type: "text",
+          text: "Visible text",
+        },
+      ],
+    })
   })
 
   test("sets summarized display for Claude versions at least 4.7", () => {
