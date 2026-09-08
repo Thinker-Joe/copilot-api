@@ -1,0 +1,10 @@
+services:
+  copilot-api:
+    image: ${COPILOT_API_IMAGE:-ghcr.io/thinker-joe/copilot-api:dev}
+    pull_policy: always
+    volumes:
+      - type: bind
+        source: ${COPILOT_API_DATA_DIR:-./data}
+        target: /data
+        bind:
+          create_host_path: false

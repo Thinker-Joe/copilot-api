@@ -3,6 +3,13 @@ node_modules/
 
 # local env
 *.local
+.env
+.env.*
+!.env.example
+!.env.sv.example
+/data/
+/copilot-data/
+/coverage/
 
 # aider
 .aider*

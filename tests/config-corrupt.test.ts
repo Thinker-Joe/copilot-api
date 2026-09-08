@@ -58,11 +58,33 @@ function runConfigScript(tempDir: string, script: string): ConfigScriptResult {
 
 afterEach(() => {
   while (tempDirs.length > 0) {
-    fs.rmSync(tempDirs.pop()!, { recursive: true, force: true })
+    const tempDir = tempDirs.pop()!
+    const configPath = path.join(tempDir, "config.json")
+    if (fs.existsSync(configPath)) fs.chmodSync(configPath, 0o600)
+    fs.rmSync(tempDir, { recursive: true, force: true })
   }
 })
 
 describe("corrupt config file", () => {
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "preserves an unreadable config in a writable directory",
+    () => {
+      const tempDir = createTempConfigDir()
+      const configPath = path.join(tempDir, "config.json")
+      const sentinel = '{"auth":{"apiKeys":["preserve-me"]}}'
+      fs.writeFileSync(configPath, sentinel)
+      fs.chmodSync(configPath, 0o200)
+      const result = runConfigScript(
+        tempDir,
+        'const { getConfig } = await import("./src/lib/config"); getConfig();',
+      )
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stderr).toContain("EACCES")
+      fs.chmodSync(configPath, 0o600)
+      expect(fs.readFileSync(configPath, "utf8")).toBe(sentinel)
+    },
+  )
+
   test("refuses to merge defaults and preserves the corrupt config on disk", () => {
     const tempDir = createTempConfigDir()
     const configPath = writeCorruptConfigFile(tempDir)

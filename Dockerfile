@@ -15,6 +15,7 @@ WORKDIR /app
 ENV NODE_ENV=production \
     NODE_USE_SYSTEM_CA=1 \
     COPILOT_API_HOME=/data \
+    COPILOT_API_HEALTHCHECK_FILE=/tmp/copilot-api/healthcheck-url \
     PORT=4141
 
 RUN apk add --no-cache curl
@@ -25,16 +26,18 @@ RUN bun install --frozen-lockfile --production --ignore-scripts --no-cache
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/pages ./pages
 COPY entrypoint.sh /entrypoint.sh
+COPY healthcheck.sh /healthcheck.sh
 
-RUN chmod +x /entrypoint.sh && \
+RUN chmod +x /entrypoint.sh /healthcheck.sh && \
     mkdir -p /data && \
-    chown -R bun:bun /app /data
+    chown bun:bun /data && \
+    chmod 700 /data
 
 USER bun
 VOLUME ["/data"]
 EXPOSE 4141
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
-  CMD curl -fsS "http://127.0.0.1:${PORT:-4141}/" >/dev/null || exit 1
+  CMD ["/healthcheck.sh"]
 
 ENTRYPOINT ["/entrypoint.sh"]

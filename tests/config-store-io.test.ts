@@ -3,7 +3,11 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-import { setConfiguredApiKeys, writeConfigToDisk } from "~/lib/config-store"
+import {
+  reloadConfig,
+  setConfiguredApiKeys,
+  writeConfigToDisk,
+} from "~/lib/config-store"
 import { PATHS } from "~/lib/paths"
 
 interface StoredConfig {
@@ -17,6 +21,7 @@ interface StoredConfig {
 
 const originalAppDir = PATHS.APP_DIR
 const originalConfigPath = PATHS.CONFIG_PATH
+const originalAccessSync = fs.accessSync
 const tempDirs: Array<string> = []
 
 function useTempConfigPath(): string {
@@ -28,6 +33,7 @@ function useTempConfigPath(): string {
 }
 
 afterEach(() => {
+  fs.accessSync = originalAccessSync
   PATHS.APP_DIR = originalAppDir
   PATHS.CONFIG_PATH = originalConfigPath
   while (tempDirs.length > 0) {
@@ -64,6 +70,28 @@ test("writeConfigToDisk atomically replaces the editable config", () => {
   })
   expect(fs.readdirSync(path.dirname(configPath))).toEqual(["config.json"])
 })
+
+test("reloadConfig creates a protected config when it is missing", () => {
+  const configPath = useTempConfigPath()
+  expect(reloadConfig().auth?.apiKeys).toEqual([])
+  if (process.platform !== "win32") {
+    expect(fs.statSync(configPath).mode & 0o777).toBe(0o600)
+  }
+})
+
+test.each(["EACCES", "EPERM", "EIO", undefined])(
+  "reloadConfig preserves data when checking existence fails with %s",
+  (code) => {
+    const configPath = useTempConfigPath()
+    const sentinel = '{"auth":{"apiKeys":["preserve-me"]}}'
+    fs.writeFileSync(configPath, sentinel)
+    fs.accessSync = () => {
+      throw Object.assign(new Error("simulated filesystem error"), { code })
+    }
+    expect(() => reloadConfig()).toThrow("simulated filesystem error")
+    expect(fs.readFileSync(configPath, "utf8")).toBe(sentinel)
+  },
+)
 
 test("setConfiguredApiKeys normalizes keys and preserves other config fields", () => {
   const configPath = useTempConfigPath()
