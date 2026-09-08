@@ -6,7 +6,8 @@ import { streamSSE, type SSEMessage } from "hono/streaming"
 import { resolveMappedModel } from "~/lib/config"
 import { createHandlerLogger, debugJson } from "~/lib/logger"
 import { findEndpointModel } from "~/lib/models"
-import { parseProviderModelAlias } from "~/lib/provider-model"
+import { writeSSEIfConnected } from "~/lib/sse"
+import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
 import {
   createCopilotTokenUsageRecorder,
   normalizeOpenAIUsage,
@@ -34,7 +35,9 @@ export async function handleCompletion(c: Context) {
     )
   }
 
-  const providerModelAlias = parseProviderModelAlias(payload.model)
+  const providerModelAlias = await resolveConfiguredProviderModelAlias(
+    payload.model,
+  )
   if (providerModelAlias) {
     payload.model = providerModelAlias.model
     return await handleProviderChatCompletionsForProvider(c, {
@@ -79,6 +82,7 @@ export async function handleCompletion(c: Context) {
   })
 
   const response = await createChatCompletions(payload, {
+    clientSignal: c.req.raw.signal,
     requestId,
     sessionId,
   })
@@ -109,7 +113,7 @@ export async function handleCompletion(c: Context) {
           ),
         }
       }
-      await stream.writeSSE(chunk as SSEMessage)
+      await writeSSEIfConnected(stream, chunk as SSEMessage)
     }
 
     recordUsage(usage)

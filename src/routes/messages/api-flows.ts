@@ -8,6 +8,7 @@ import type { SubagentMarker } from "~/lib/subagent"
 import type { Model } from "~/lib/types/models"
 
 import { debugJson, debugJsonTail, debugLazy } from "~/lib/logger"
+import { writeSSEIfConnected } from "~/lib/sse"
 import { resolveBridgeToolSearchName } from "~/lib/tool-search"
 import {
   createCopilotTokenUsageRecorder,
@@ -63,6 +64,7 @@ import { prepareMessagesApiPayload } from "./preprocess"
 import {
   flushPendingAnthropicStreamEvents,
   translateChunkToAnthropicEvents,
+  translateErrorToAnthropicErrorEvent,
 } from "./stream-translation"
 
 const COPILOT_CONTEXT_CACHE_SYSTEM_MARKER_LIMIT = 2
@@ -129,6 +131,7 @@ export const handleWithChatCompletions = async (
   const response = await messagesApiFlowDependencies.createChatCompletions(
     openAIPayload,
     {
+      clientSignal: c.req?.raw?.signal,
       subagentMarker,
       requestId,
       sessionId,
@@ -154,49 +157,65 @@ export const handleWithChatCompletions = async (
     let usage: UsageTokens = {}
     const streamState: AnthropicStreamState = {
       messageStartSent: false,
+      messageCompleted: false,
       contentBlockIndex: 0,
       contentBlockOpen: false,
       toolCalls: {},
       thinkingBlockOpen: false,
     }
 
-    for await (const rawEvent of response) {
-      debugJson(logger, "Copilot raw stream event:", rawEvent)
-      if (rawEvent.data === "[DONE]") {
-        break
-      }
+    try {
+      for await (const rawEvent of response) {
+        debugJson(logger, "Copilot raw stream event:", rawEvent)
+        if (rawEvent.data === "[DONE]") {
+          break
+        }
 
-      if (!rawEvent.data) {
-        continue
-      }
+        if (!rawEvent.data) {
+          continue
+        }
 
-      const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
-      if (chunk.usage || chunk.copilot_usage) {
-        usage = {
-          ...normalizeOpenAIUsage(chunk.usage),
-          total_nano_aiu: normalizeOptionalToken(
-            chunk.copilot_usage?.total_nano_aiu,
-          ),
+        const chunk = JSON.parse(rawEvent.data) as ChatCompletionChunk
+        if (chunk.usage || chunk.copilot_usage) {
+          usage = {
+            ...normalizeOpenAIUsage(chunk.usage),
+            total_nano_aiu: normalizeOptionalToken(
+              chunk.copilot_usage?.total_nano_aiu,
+            ),
+          }
+        }
+        const events = translateChunkToAnthropicEvents(chunk, streamState)
+
+        for (const event of events) {
+          const eventData = JSON.stringify(event)
+          debugLazy(logger, () => ["Translated Anthropic event:", eventData])
+          await writeSSEIfConnected(stream, {
+            event: event.type,
+            data: eventData,
+          })
         }
       }
-      const events = translateChunkToAnthropicEvents(chunk, streamState)
-
-      for (const event of events) {
-        const eventData = JSON.stringify(event)
-        debugLazy(logger, () => ["Translated Anthropic event:", eventData])
-        await stream.writeSSE({
-          event: event.type,
-          data: eventData,
-        })
-      }
+    } catch (error) {
+      logger.warn("Chat completions stream interrupted:", error)
     }
 
     for (const event of flushPendingAnthropicStreamEvents(streamState)) {
       const eventData = JSON.stringify(event)
       debugLazy(logger, () => ["Translated Anthropic event:", eventData])
-      await stream.writeSSE({
+      await writeSSEIfConnected(stream, {
         event: event.type,
         data: eventData,
+      })
+    }
+
+    if (!streamState.messageCompleted) {
+      logger.warn(
+        "Chat completions stream ended without completion; sending error event",
+      )
+      const errorEvent = translateErrorToAnthropicErrorEvent()
+      await writeSSEIfConnected(stream, {
+        event: errorEvent.type,
+        data: JSON.stringify(errorEvent),
       })
     }
 
@@ -246,7 +265,7 @@ export const handleWithResponsesApi = async (
     {
       vision,
       initiator,
-      signal: c.req?.raw?.signal,
+      clientSignal: c.req?.raw?.signal,
       transport,
       ...requestOptions,
     },
@@ -263,7 +282,10 @@ export const handleWithResponsesApi = async (
       for await (const chunk of response) {
         const eventName = chunk.event
         if (eventName === "ping") {
-          await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+          await writeSSEIfConnected(stream, {
+            event: "ping",
+            data: '{"type":"ping"}',
+          })
           continue
         }
 
@@ -292,7 +314,7 @@ export const handleWithResponsesApi = async (
         for (const event of events) {
           const eventData = JSON.stringify(event)
           debugLazy(logger, () => ["Translated Anthropic event:", eventData])
-          await stream.writeSSE({
+          await writeSSEIfConnected(stream, {
             event: event.type,
             data: eventData,
           })
@@ -309,9 +331,9 @@ export const handleWithResponsesApi = async (
           "Responses stream ended without completion; sending error event",
         )
         const errorEvent = buildErrorEvent(
-          "Responses stream ended without completion",
+          "Responses stream ended without completion, retry your request.",
         )
-        await stream.writeSSE({
+        await writeSSEIfConnected(stream, {
           event: errorEvent.type,
           data: JSON.stringify(errorEvent),
         })
@@ -368,6 +390,7 @@ export const handleWithMessagesApi = async (
     anthropicPayload,
     anthropicBetaHeader,
     {
+      clientSignal: c.req?.raw?.signal,
       subagentMarker,
       requestId,
       sessionId,
@@ -379,32 +402,57 @@ export const handleWithMessagesApi = async (
     logger.debug("Streaming response from Copilot (Messages API)")
     return streamSSE(c, async (stream) => {
       let usage: UsageTokens = {}
+      let messageStopSeen = false
+      let errorSeen = false
 
-      for await (const event of response) {
-        const eventName = event.event
-        const data = event.data ?? ""
-        if (data === "[DONE]") {
-          break
-        }
-        if (!data) {
-          continue
-        }
-        debugLazy(logger, () => ["Messages raw stream event:", data])
-        const parsedEvent = parseAnthropicStreamEvent(data)
-        if (parsedEvent?.type === "message_start") {
-          usage = mergeAnthropicUsage(usage, {
-            ...normalizeAnthropicUsage(parsedEvent.message.usage),
-            ...normalizeCopilotUsage(parsedEvent.message.copilot_usage),
+      try {
+        for await (const event of response) {
+          const eventName = event.event
+          const data = event.data ?? ""
+          if (data === "[DONE]") {
+            break
+          }
+          if (!data) {
+            continue
+          }
+          debugLazy(logger, () => ["Messages raw stream event:", data])
+          const parsedEvent = parseAnthropicStreamEvent(data)
+          if (parsedEvent?.type === "message_start") {
+            usage = mergeAnthropicUsage(usage, {
+              ...normalizeAnthropicUsage(parsedEvent.message.usage),
+              ...normalizeCopilotUsage(parsedEvent.message.copilot_usage),
+            })
+          } else if (parsedEvent?.type === "message_delta") {
+            usage = mergeAnthropicUsage(usage, {
+              ...normalizeAnthropicUsage(parsedEvent.usage),
+              ...normalizeCopilotUsage(parsedEvent.copilot_usage),
+            })
+          }
+          if (
+            parsedEvent?.type === "message_stop"
+            || eventName === "message_stop"
+          ) {
+            messageStopSeen = true
+          } else if (parsedEvent?.type === "error" || eventName === "error") {
+            errorSeen = true
+          }
+          await writeSSEIfConnected(stream, {
+            event: eventName,
+            data,
           })
-        } else if (parsedEvent?.type === "message_delta") {
-          usage = mergeAnthropicUsage(usage, {
-            ...normalizeAnthropicUsage(parsedEvent.usage),
-            ...normalizeCopilotUsage(parsedEvent.copilot_usage),
-          })
         }
-        await stream.writeSSE({
-          event: eventName,
-          data,
+      } catch (error) {
+        logger.warn("Messages stream interrupted:", error)
+      }
+
+      if (!messageStopSeen && !errorSeen) {
+        logger.warn(
+          "Messages stream ended without completion; sending error event",
+        )
+        const errorEvent = translateErrorToAnthropicErrorEvent()
+        await writeSSEIfConnected(stream, {
+          event: errorEvent.type,
+          data: JSON.stringify(errorEvent),
         })
       }
 

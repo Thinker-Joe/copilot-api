@@ -1,5 +1,5 @@
 import type { TokenUsagePricingConfig } from "./token-usage/pricing"
-import type { CodexReasoningEffort } from "./config-store"
+import type { CodexReasoningEffort, ModelReasoningField } from "./config-store"
 
 export type BuiltinProviderInputModality = "text" | "image"
 
@@ -10,6 +10,11 @@ export interface BuiltinProviderModelConfig {
   maxOutputTokens?: number
   pricing: TokenUsagePricingConfig
   reasoningEfforts?: Array<CodexReasoningEffort>
+  // Message field carrying assistant thinking text in upstream requests,
+  // for models that do not follow the default "reasoning_content"
+  // convention (e.g. opencode-go hy3/hy4 use the OpenRouter-style
+  // "reasoning" field)
+  reasoningField?: ModelReasoningField
 }
 
 type BuiltinProviderModelCatalog = Record<
@@ -82,17 +87,17 @@ export class BuiltinProviderModelRegistry {
         pricing: {
           tiers: [
             {
-              cacheCreationInput: 6.25,
-              cachedInput: 0.5,
-              input: 5,
+              cacheCreationInput: 5,
+              cachedInput: 0.4,
+              input: 4,
               maxInputTokens: 272_000,
-              output: 30,
+              output: 20,
             },
             {
-              cacheCreationInput: 12.5,
-              cachedInput: 1,
-              input: 10,
-              output: 45,
+              cacheCreationInput: 10,
+              cachedInput: 0.8,
+              input: 8,
+              output: 30,
             },
           ],
         },
@@ -131,6 +136,25 @@ export class BuiltinProviderModelRegistry {
               cachedInput: 0.04,
               input: 0.4,
               output: 1.8,
+            },
+          ],
+        },
+      },
+      "gpt-6-astra": {
+        pricing: {
+          tiers: [
+            {
+              cacheCreationInput: 12.5,
+              cachedInput: 1,
+              input: 10,
+              maxInputTokens: 272_000,
+              output: 50,
+            },
+            {
+              cacheCreationInput: 25,
+              cachedInput: 2,
+              input: 20,
+              output: 75,
             },
           ],
         },
@@ -250,9 +274,19 @@ export class BuiltinProviderModelRegistry {
         inputModalities: ["text"],
         maxOutputTokens: 64_000,
         pricing: {
-          cachedInput: 0.02,
-          input: 1,
-          output: 2,
+          cachedInput: 0.1,
+          input: 3,
+          output: 9,
+        },
+      },
+      "deepseek-v4-flash-vision-exp": {
+        contextWindow: 1_000_000,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 64_000,
+        pricing: {
+          cachedInput: 0.1,
+          input: 3,
+          output: 9,
         },
       },
       "deepseek-v4-pro": {
@@ -260,9 +294,9 @@ export class BuiltinProviderModelRegistry {
         inputModalities: ["text"],
         maxOutputTokens: 64_000,
         pricing: {
-          cachedInput: 0.025,
-          input: 3,
-          output: 6,
+          cachedInput: 0.3,
+          input: 9,
+          output: 27,
         },
       },
     },
@@ -276,6 +310,19 @@ export class BuiltinProviderModelRegistry {
           input: 0.14,
           output: 0.58,
         },
+        reasoningField: "reasoning",
+      },
+      "hy4-preview": {
+        contextWindow: 1_024_000,
+        inputModalities: ["text"],
+        maxOutputTokens: 64_000,
+        pricing: {
+          cachedInput: 0.042,
+          input: 0.834,
+          output: 2.501,
+        },
+        reasoningEfforts: ["high"],
+        reasoningField: "reasoning",
       },
       "gpt-5.6-luna": {
         pricing: {
@@ -316,6 +363,39 @@ export class BuiltinProviderModelRegistry {
           output: 4.4,
         },
       },
+      "glm-5.3-flash": {
+        contextWindow: 1_000_000,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 131_072,
+        pricing: {
+          cachedInput: 0.015,
+          input: 0.075,
+          output: 0.25,
+        },
+        reasoningEfforts: ["low", "high", "max"],
+      },
+      "muse-spark-1.2-contributor": {
+        contextWindow: 1_048_576,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 131_072,
+        pricing: {
+          cachedInput: 0.002,
+          input: 0.1,
+          output: 0.2,
+        },
+        reasoningEfforts: ["minimal", "low", "medium", "high", "xhigh"],
+      },
+      "muse-spark-1.3-contributor": {
+        contextWindow: 1_048_576,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 131_072,
+        pricing: {
+          cachedInput: 0.002,
+          input: 0.1,
+          output: 0.2,
+        },
+        reasoningEfforts: ["minimal", "low", "medium", "high", "xhigh"],
+      },
       "grok-4.5": {
         contextWindow: 500_000,
         defaultReasoningEffort: "high",
@@ -338,24 +418,57 @@ export class BuiltinProviderModelRegistry {
         },
         reasoningEfforts: ["low", "medium", "high"],
       },
+      "grok-4.6": {
+        contextWindow: 500_000,
+        defaultReasoningEffort: "high",
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 64_000,
+        pricing: {
+          tiers: [
+            {
+              cachedInput: 0.5,
+              input: 2,
+              maxInputTokens: 200_000,
+              output: 6,
+            },
+            {
+              cachedInput: 1,
+              input: 4,
+              output: 12,
+            },
+          ],
+        },
+        reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      },
       "deepseek-v4-flash": {
         contextWindow: 1_000_000,
         inputModalities: ["text"],
         maxOutputTokens: 64_000,
         pricing: {
-          cachedInput: 0.0028,
-          input: 0.14,
-          output: 0.28,
+          cachedInput: 0.007,
+          input: 0.22,
+          output: 0.66,
         },
+      },
+      "deepseek-v4-flash-vision-exp": {
+        contextWindow: 1_000_000,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 384_000,
+        pricing: {
+          cachedInput: 0.007,
+          input: 0.22,
+          output: 0.66,
+        },
+        reasoningEfforts: ["low", "high", "max"],
       },
       "deepseek-v4-pro": {
         contextWindow: 1_000_000,
         inputModalities: ["text"],
         maxOutputTokens: 64_000,
         pricing: {
-          cachedInput: 0.0145,
-          input: 1.74,
-          output: 3.48,
+          cachedInput: 0.022,
+          input: 0.66,
+          output: 1.98,
         },
       },
       "kimi-k2.7-code": {
@@ -442,6 +555,18 @@ export class BuiltinProviderModelRegistry {
           input: 2,
           output: 6,
         },
+      },
+      "qwen3.8-flash": {
+        contextWindow: 1_000_000,
+        inputModalities: ["text", "image"],
+        maxOutputTokens: 131_072,
+        pricing: {
+          cacheCreationInput: 0.2,
+          cachedInput: 0.016,
+          input: 0.15,
+          output: 0.47,
+        },
+        reasoningEfforts: ["low", "medium", "xhigh"],
       },
       "minimax-m2.7": {
         contextWindow: 204_800,

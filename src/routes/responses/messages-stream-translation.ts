@@ -17,6 +17,7 @@ import { CustomToolInputStreamDecoder } from "./custom-tool-input-stream-decoder
 import {
   createMessagesBackedResponsesResult,
   encodeMessagesCompaction,
+  markMessagesReasoningId,
   resolveToolDescriptor,
   ResponsesMessagesTranslationError,
   toResponseId,
@@ -121,13 +122,22 @@ export async function* translateMessagesStream(
     }
 
     if (!state.messageStopped) {
-      for (const translated of closeAllBlocks(state)) yield translated
-      for (const translated of finishCompaction(state)) yield translated
-      state.messageStopped = true
-      yield createTerminalEvent(state)
+      // The upstream messages stream ended without a message_stop event,
+      // which means it was interrupted. Surface a failure instead of
+      // synthesizing a completed response.
+      throw new ResponsesMessagesTranslationError(
+        "Messages stream ended without a message_stop event",
+        502,
+      )
     }
   } catch (error) {
-    if (!state.initialized) throw error
+    if (!state.initialized) {
+      // No lifecycle events reached the client yet. Emit response.created and
+      // response.in_progress before the failure so clients tracking the
+      // lifecycle receive a protocol-valid stream instead of a silent close.
+      yield createLifecycleEvent(state, "response.created")
+      yield createLifecycleEvent(state, "response.in_progress")
+    }
     yield createErrorEvent(state, error)
     yield createFailedEvent(state, error)
   }
@@ -431,7 +441,9 @@ function* startContentBlock(
 
   if (block.type === "thinking") {
     const item: ResponseOutputReasoning = {
-      id: `rs_${state.responseId.slice(-18)}_${event.index}`,
+      id: markMessagesReasoningId(
+        `rs_${state.responseId.slice(-18)}_${event.index}`,
+      ),
       type: "reasoning",
       status: "in_progress",
       summary: [],
@@ -467,7 +479,6 @@ function* startContentBlock(
   if (block.type === "tool_use") {
     const descriptor = resolveToolDescriptor(state.context.registry, block.name)
     const common = {
-      id: `fc_${state.responseId.slice(-18)}_${event.index}`,
       call_id: block.id,
       name: descriptor.name,
       status: "in_progress" as const,
@@ -476,6 +487,7 @@ function* startContentBlock(
     if (descriptor.kind === "custom") {
       const item: ResponseOutputCustomToolCall = {
         ...common,
+        id: `ctc_${state.responseId.slice(-18)}_${event.index}`,
         type: "custom_tool_call",
         input: "",
       }
@@ -508,6 +520,7 @@ function* startContentBlock(
 
     const item: ResponseOutputFunctionCall = {
       ...common,
+      id: `fc_${state.responseId.slice(-18)}_${event.index}`,
       type: "function_call",
       arguments: "",
     }

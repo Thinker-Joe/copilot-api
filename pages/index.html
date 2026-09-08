@@ -407,12 +407,12 @@
               />
             </div>
             <div>
-              <label for="x-api-key" class="field-label">x-api-key</label>
+              <label for="x-api-key" class="field-label">Auth credential</label>
               <input
                 type="password"
                 id="x-api-key"
                 class="input-control input-focus"
-                placeholder="Optional when auth is enabled"
+                placeholder="x-api-key or Authorization Bearer"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -423,9 +423,12 @@
                 id="token-usage-period"
                 class="select-control input-focus"
               >
-                <option value="day">Day</option>
-                <option value="week">Week</option>
-                <option value="month">Month</option>
+                <option value="today">Today</option>
+                <option value="this_week">This week</option>
+                <option value="last_7_days">Last 7 days</option>
+                <option value="this_month">This month</option>
+                <option value="last_30_days">Last 30 days</option>
+                <option value="lifetime">Lifetime</option>
               </select>
             </div>
             <button id="fetch-button" type="submit" class="primary-action">
@@ -433,6 +436,9 @@
               <span>Refresh</span>
             </button>
           </form>
+          <p class="mt-2 text-xs" style="color: var(--color-gray);">
+            Credentials are remembered per endpoint origin and are not sent to other endpoints.
+          </p>
         </header>
 
         <main id="content-area" class="content-area"></main>
@@ -460,12 +466,21 @@
         });
 
         const DEFAULT_ENDPOINT = "http://localhost:4141/usage";
-        const DEFAULT_TOKEN_USAGE_PERIOD = "day";
+        const DEFAULT_TOKEN_USAGE_PERIOD = "today";
         const DEFAULT_TOKEN_USAGE_EVENTS_PAGE_SIZE = 20;
+        const MAX_LIFETIME_TREND_POINTS = 180;
         const ALL_METRICS_VALUE = "__all__";
         const ALL_MODELS_VALUE = "__all__";
-        const API_KEY_STORAGE_KEY = "copilot-api.usage-viewer.x-api-key";
-        const VALID_PERIODS = new Set(["day", "week", "month"]);
+        const LEGACY_API_KEY_STORAGE_KEY = "copilot-api.usage-viewer.x-api-key";
+        const CREDENTIAL_STORAGE_PREFIX = "copilot-api.usage-viewer.credential.";
+        const VALID_PERIODS = new Set([
+          "today",
+          "this_week",
+          "last_7_days",
+          "this_month",
+          "last_30_days",
+          "lifetime",
+        ]);
         const EMPTY_TOKEN_USAGE_TOTALS = {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
@@ -491,7 +506,7 @@
           tokenUsageSummaryError: null,
           tokenUsageEventsError: null,
           tokenUsagePeriod: DEFAULT_TOKEN_USAGE_PERIOD,
-          tokenUsageTrendDayIndex: null,
+          tokenUsageTrendDay: null,
           tokenUsageTrendMetric: ALL_METRICS_VALUE,
           tokenUsageTrendModel: ALL_MODELS_VALUE,
         };
@@ -532,10 +547,17 @@
           );
         }
 
+        const LEGACY_PERIODS = {
+          day: "today",
+          week: "last_7_days",
+          month: "last_30_days",
+        };
+
         function normalizePeriod(value) {
-          return VALID_PERIODS.has(value)
-            ? value
-            : DEFAULT_TOKEN_USAGE_PERIOD;
+          if (VALID_PERIODS.has(value)) {
+            return value;
+          }
+          return LEGACY_PERIODS[value] || DEFAULT_TOKEN_USAGE_PERIOD;
         }
 
         function getSelectedPeriod() {
@@ -545,33 +567,156 @@
           return normalized;
         }
 
-        function loadStoredApiKey() {
+        function getEndpointOrigin(endpoint) {
+          if (!endpoint) {
+            return "";
+          }
           try {
-            return localStorage.getItem(API_KEY_STORAGE_KEY) || "";
+            return new URL(endpoint, window.location.href).origin;
           } catch (error) {
-            console.warn("Could not read stored API key:", getErrorMessage(error));
+            console.warn("Could not parse endpoint URL:", getErrorMessage(error));
             return "";
           }
         }
 
-        function storeApiKey(value) {
-          try {
-            const trimmed = value.trim();
-            if (trimmed) {
-              localStorage.setItem(API_KEY_STORAGE_KEY, trimmed);
-            } else {
-              localStorage.removeItem(API_KEY_STORAGE_KEY);
-            }
-          } catch (error) {
-            console.warn("Could not store API key:", getErrorMessage(error));
+        function getCredentialStorageKey(endpoint) {
+          const origin = getEndpointOrigin(endpoint);
+          return origin ? `${CREDENTIAL_STORAGE_PREFIX}${origin}` : "";
+        }
+
+        function readStoredApiKey(endpoint) {
+          const storageKey = getCredentialStorageKey(endpoint);
+          if (!storageKey) {
+            return "";
           }
+          try {
+            return window.localStorage.getItem(storageKey) || "";
+          } catch (error) {
+            console.warn(
+              "Could not read stored credential:",
+              getErrorMessage(error)
+            );
+            return "";
+          }
+        }
+
+        function writeStoredApiKey(endpoint, value) {
+          const storageKey = getCredentialStorageKey(endpoint);
+          if (!storageKey) {
+            return;
+          }
+          try {
+            window.localStorage.setItem(storageKey, value);
+          } catch (error) {
+            console.warn(
+              "Could not store credential:",
+              getErrorMessage(error)
+            );
+          }
+        }
+
+        function removeStoredApiKey(endpoint) {
+          const storageKey = getCredentialStorageKey(endpoint);
+          if (!storageKey) {
+            return;
+          }
+          try {
+            window.localStorage.removeItem(storageKey);
+          } catch (error) {
+            console.warn(
+              "Could not remove stored credential:",
+              getErrorMessage(error)
+            );
+          }
+        }
+
+        function removeLegacyStoredApiKey() {
+          try {
+            window.localStorage.removeItem(LEGACY_API_KEY_STORAGE_KEY);
+          } catch (error) {
+            console.warn(
+              "Could not remove legacy credential:",
+              getErrorMessage(error)
+            );
+          }
+        }
+
+        function migrateLegacyApiKey(endpoint) {
+          const storageKey = getCredentialStorageKey(endpoint);
+          if (storageKey && getEndpointOrigin(endpoint) === window.location.origin) {
+            try {
+              const legacyValue = window.localStorage.getItem(
+                LEGACY_API_KEY_STORAGE_KEY
+              );
+              if (legacyValue && !window.localStorage.getItem(storageKey)) {
+                window.localStorage.setItem(storageKey, legacyValue);
+              }
+            } catch (error) {
+              console.warn(
+                "Could not migrate legacy credential:",
+                getErrorMessage(error)
+              );
+            }
+          }
+          removeLegacyStoredApiKey();
+        }
+
+        function loadStoredApiKey(endpoint) {
+          return readStoredApiKey(endpoint);
+        }
+
+        function storeApiKey(value, endpoint) {
+          const trimmed = value.trim();
+          if (trimmed) {
+            writeStoredApiKey(endpoint, trimmed);
+          } else {
+            removeStoredApiKey(endpoint);
+          }
+        }
+
+        function parseCredential(value) {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            return null;
+          }
+
+          const authorizationMatch = trimmed.match(
+            /^authorization\s*:\s*bearer\s+(.+)$/i
+          );
+          if (authorizationMatch) {
+            return {
+              header: "authorization",
+              value: `Bearer ${authorizationMatch[1].trim()}`,
+            };
+          }
+
+          const bearerMatch = trimmed.match(/^bearer\s+(.+)$/i);
+          if (bearerMatch) {
+            return {
+              header: "authorization",
+              value: `Bearer ${bearerMatch[1].trim()}`,
+            };
+          }
+
+          const xApiKeyMatch = trimmed.match(/^x-api-key\s*:\s*(.+)$/i);
+          if (xApiKeyMatch) {
+            return {
+              header: "x-api-key",
+              value: xApiKeyMatch[1].trim(),
+            };
+          }
+
+          return {
+            header: "x-api-key",
+            value: trimmed,
+          };
         }
 
         function buildRequestHeaders() {
           const headers = {};
-          const apiKey = apiKeyInput.value.trim();
-          if (apiKey) {
-            headers["x-api-key"] = apiKey;
+          const credential = parseCredential(apiKeyInput.value);
+          if (credential) {
+            headers[credential.header] = credential.value;
           }
           return headers;
         }
@@ -768,20 +913,40 @@
           return trimmed || "—";
         }
 
+        function formatRangeDate(value) {
+          const date = new Date(value);
+          if (!Number.isFinite(date.getTime())) {
+            return "N/A";
+          }
+          const options = { day: "numeric", month: "short" };
+          if (date.getFullYear() !== new Date().getFullYear()) {
+            options.year = "numeric";
+          }
+          return date.toLocaleDateString("en-US", options);
+        }
+
+        function formatRangeText(range) {
+          const start = formatRangeDate(range.start_ms);
+          const end = formatRangeDate(range.end_ms - 1);
+          return start === end ? start : `${start} - ${end}`;
+        }
+
         function renderTokenUsageRangeText(period, range) {
           const labels = {
-            day: "Day window",
-            week: "Last 7 days",
-            month: "Last 30 days",
+            today: "Today",
+            this_week: "This week",
+            last_7_days: "Last 7 days",
+            this_month: "This month",
+            last_30_days: "Last 30 days",
+            lifetime: "Lifetime",
           };
+          const label = labels[period] || labels.today;
 
-          if (!range) {
-            return labels[period] || labels.day;
+          if (!range || range.end_ms <= range.start_ms) {
+            return label;
           }
 
-          return `${labels[period] || labels.day}: ${formatDateTime(
-            range.start_ms
-          )} - ${formatDateTime(range.end_ms)}`;
+          return `${label}: ${formatRangeText(range)}`;
         }
 
         /**
@@ -1207,8 +1372,46 @@
           return parts.length === 3 ? `${parts[1]}/${parts[2]}` : value;
         }
 
+        function getTokenUsageTrendDays(dailySummary, selectedModel) {
+          const days = dailySummary?.days || [];
+          if (
+            state.tokenUsagePeriod !== "lifetime"
+            || days.length <= MAX_LIFETIME_TREND_POINTS
+          ) {
+            return days;
+          }
+
+          const usageIndexes = days.reduce((indexes, day, index) => {
+            if (getDailyTrendTotals(day, selectedModel).request_count > 0) {
+              indexes.push(index);
+            }
+            return indexes;
+          }, []);
+          if (usageIndexes.length >= MAX_LIFETIME_TREND_POINTS) {
+            const step =
+              (usageIndexes.length - 1) / (MAX_LIFETIME_TREND_POINTS - 1);
+            return Array.from(
+              { length: MAX_LIFETIME_TREND_POINTS },
+              (_, index) => days[usageIndexes[Math.round(index * step)]]
+            );
+          }
+          const indexes = new Set(usageIndexes);
+          const sampleCount = Math.max(
+            1,
+            MAX_LIFETIME_TREND_POINTS - usageIndexes.length
+          );
+          const step = (days.length - 1) / (sampleCount - 1 || 1);
+          for (let index = 0; index < sampleCount; index += 1) {
+            indexes.add(Math.round(index * step));
+          }
+          return [...indexes]
+            .sort((left, right) => left - right)
+            .slice(0, MAX_LIFETIME_TREND_POINTS)
+            .map((index) => days[index]);
+        }
+
         function renderTokenUsageDailyTrend(dailySummary, error) {
-          if (state.tokenUsagePeriod === "day") {
+          if (state.tokenUsagePeriod === "today") {
             return "";
           }
 
@@ -1308,7 +1511,6 @@
         }
 
         function renderTokenUsageTrendChart(dailySummary, selectedModel) {
-          const days = dailySummary?.days || [];
           const metrics = getTokenUsageTrendMetrics();
           const visibleMetrics =
             state.tokenUsageTrendMetric === ALL_METRICS_VALUE
@@ -1316,6 +1518,7 @@
               : metrics.filter(
                   (metric) => metric.key === state.tokenUsageTrendMetric
                 );
+          const days = getTokenUsageTrendDays(dailySummary, selectedModel);
           const hasUsage = days.some(
             (day) => getDailyTrendTotals(day, selectedModel).request_count > 0
           );
@@ -1324,11 +1527,12 @@
               ? index
               : latest;
           }, -1);
+          const selectedDayIndex = days.findIndex(
+            (day) => day.date === state.tokenUsageTrendDay
+          );
           const activeIndex =
-            Number.isInteger(state.tokenUsageTrendDayIndex)
-              && state.tokenUsageTrendDayIndex >= 0
-              && state.tokenUsageTrendDayIndex < days.length
-              ? state.tokenUsageTrendDayIndex
+            selectedDayIndex >= 0
+              ? selectedDayIndex
               : latestUsageIndex >= 0
                 ? latestUsageIndex
                 : Math.max(0, days.length - 1);
@@ -1417,7 +1621,7 @@
                     value
                   )}" r="2.5" fill="${
                     metric.color
-                  }" data-trend-day-index="${index}">
+                  }" data-trend-day="${escapeHtml(day.date)}">
                     <title>${escapeHtml(
                       `${formatChartDate(day.date)} ${metric.label}: ${formatNumber(
                         value
@@ -1461,7 +1665,7 @@
               ].join("\n");
               return `<rect x="${hitStart}" y="${padding.top}" width="${
                 hitEnd - hitStart
-              }" height="${plotHeight}" fill="transparent" style="cursor: pointer;" data-trend-day-index="${index}">
+              }" height="${plotHeight}" fill="transparent" style="cursor: pointer;" data-trend-day="${escapeHtml(day.date)}">
                 <title>${escapeHtml(title)}</title>
               </rect>`;
             })
@@ -2001,7 +2205,8 @@
          */
         function handleFormSubmit(event) {
           event.preventDefault();
-          storeApiKey(apiKeyInput.value);
+          syncEndpointCredential();
+          storeApiKey(apiKeyInput.value, endpointUrlInput.value.trim());
           syncUrlState();
           void fetchData();
         }
@@ -2025,14 +2230,11 @@
             return;
           }
 
-          const trendPoint = event.target.closest("[data-trend-day-index]");
+          const trendPoint = event.target.closest("[data-trend-day]");
           if (trendPoint) {
-            const index = Number.parseInt(
-              trendPoint.getAttribute("data-trend-day-index") || "",
-              10
-            );
-            if (Number.isFinite(index) && index >= 0) {
-              state.tokenUsageTrendDayIndex = index;
+            const day = trendPoint.getAttribute("data-trend-day");
+            if (day) {
+              state.tokenUsageTrendDay = day;
               render();
             }
             return;
@@ -2074,6 +2276,18 @@
           render();
         }
 
+        let currentEndpointOrigin = "";
+
+        function syncEndpointCredential() {
+          const endpoint = endpointUrlInput.value.trim();
+          const endpointOrigin = getEndpointOrigin(endpoint);
+          if (endpointOrigin === currentEndpointOrigin) {
+            return;
+          }
+          apiKeyInput.value = loadStoredApiKey(endpoint);
+          currentEndpointOrigin = endpointOrigin;
+        }
+
         /**
          * Initializes the application.
          */
@@ -2081,25 +2295,29 @@
           endpointForm.addEventListener("submit", handleFormSubmit);
           tokenUsagePeriodSelect.addEventListener("change", handlePeriodChange);
           apiKeyInput.addEventListener("input", () => {
-            storeApiKey(apiKeyInput.value);
+            storeApiKey(
+              apiKeyInput.value,
+              endpointUrlInput.value.trim()
+            );
           });
+          endpointUrlInput.addEventListener("change", syncEndpointCredential);
           contentArea.addEventListener("click", handleContentAreaClick);
           contentArea.addEventListener("change", handleContentAreaChange);
-
-          apiKeyInput.value = loadStoredApiKey();
 
           const urlParams = new URLSearchParams(window.location.search);
           const periodFromUrl = normalizePeriod(urlParams.get("period"));
           const endpointFromUrl = urlParams.get("endpoint");
+          const initialEndpoint = endpointFromUrl || DEFAULT_ENDPOINT;
 
           state.tokenUsagePeriod = periodFromUrl;
           tokenUsagePeriodSelect.value = periodFromUrl;
+          endpointUrlInput.value = initialEndpoint;
+          migrateLegacyApiKey(initialEndpoint);
+          syncEndpointCredential();
 
           if (endpointFromUrl) {
-            endpointUrlInput.value = endpointFromUrl;
             void fetchData();
           } else {
-            endpointUrlInput.value = DEFAULT_ENDPOINT;
             render();
           }
         }

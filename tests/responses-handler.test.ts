@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { Hono, type Context } from "hono"
 
-import type { AnthropicMessagesPayload } from "~/lib/types/anthropic"
+import type {
+  AnthropicMessagesPayload,
+  AnthropicResponse,
+} from "~/lib/types/anthropic"
+import type { ResponsesResult } from "~/lib/types/responses"
 import type { CompletionPayloadOptions } from "~/routes/messages/handler"
+import { MESSAGES_TOOL_CALL_TIPS } from "~/routes/responses/messages-translation"
 import type { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
 
 let responsesApiWebSocketEnabled = true
@@ -29,6 +34,63 @@ const createResponsesResult = (model: string) => ({
   top_p: null,
   usage: null,
 })
+
+const createReasoningResult = (
+  model: string,
+  id: string,
+  encryptedContent: string,
+): ResponsesResult => ({
+  ...createResponsesResult(model),
+  output: [
+    {
+      id,
+      type: "reasoning",
+      status: "completed",
+      summary: [],
+      encrypted_content: encryptedContent,
+    },
+    {
+      id: `msg-${id}`,
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [
+        { type: "output_text", text: `Answer from ${model}`, annotations: [] },
+      ],
+    },
+  ],
+})
+
+const getMessageBlocks = (
+  payload: AnthropicMessagesPayload | undefined,
+): Array<Record<string, unknown>> =>
+  payload?.messages.flatMap(
+    (message): Array<Record<string, unknown>> =>
+      Array.isArray(message.content) ?
+        (message.content as unknown as Array<Record<string, unknown>>)
+      : [],
+  ) ?? []
+
+const getThinkingSignatures = (
+  payload: AnthropicMessagesPayload | undefined,
+): Array<unknown> =>
+  getMessageBlocks(payload)
+    .filter((block) => block.type === "thinking")
+    .map((block) => block.signature)
+
+const createMessagesResponse = (
+  content: AnthropicResponse["content"],
+): Response =>
+  Response.json({
+    content,
+    id: "msg-switch",
+    model: "claude-test",
+    role: "assistant",
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    type: "message",
+    usage: { input_tokens: 8, output_tokens: 2 },
+  })
 
 const { state } = await import("~/lib/state")
 const { closeUsageStore } = await import("~/lib/token-usage")
@@ -141,6 +203,188 @@ afterEach(async () => {
     defaultResponsesMessagesDependencies,
   )
   Object.assign(responsesUtilsDependencies, defaultResponsesUtilsDependencies)
+})
+
+describe("responses reasoning transport isolation", () => {
+  test("keeps only Messages reasoning when switching to a Messages model", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: { limits: { max_prompt_tokens: 128000 } },
+          id: "claude-test",
+          supported_endpoints: ["/v1/messages"],
+        },
+      ],
+    } as typeof state.models
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          createMessagesResponse([{ type: "text", text: "done" }]),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-test",
+        input: [
+          {
+            id: "rs_native",
+            type: "reasoning",
+            summary: [],
+            encrypted_content: "native-reasoning",
+          },
+          {
+            role: "assistant",
+            type: "message",
+            content: "Visible answer",
+          },
+          {
+            id: "rs_messages__a1",
+            type: "reasoning",
+            summary: [],
+            encrypted_content: "messages-reasoning",
+          },
+          {
+            type: "function_call",
+            call_id: "call-1",
+            name: "read_file",
+            arguments: '{"path":"README.md"}',
+          },
+          {
+            type: "function_call_output",
+            call_id: "call-1",
+            output: "file contents",
+          },
+          { role: "user", type: "message", content: "Continue" },
+        ],
+        tools: [
+          {
+            type: "function",
+            name: "read_file",
+            description: "Read a file",
+            parameters: { type: "object" },
+            strict: false,
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+        "session-id": "switch-session",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    const forwarded = handleMessages.mock.calls[0]?.[1]
+    const blocks = getMessageBlocks(forwarded)
+    expect(getThinkingSignatures(forwarded)).toEqual(["messages-reasoning"])
+    expect(blocks).toContainEqual({ type: "text", text: "Visible answer" })
+    expect(
+      blocks.some(
+        (block) => block.type === "tool_use" && block.id === "call-1",
+      ),
+    ).toBe(true)
+    expect(
+      blocks.some(
+        (block) =>
+          block.type === "tool_result" && block.content === "file contents",
+      ),
+    ).toBe(true)
+  })
+
+  for (const [name, models] of [
+    [
+      "Responses to Messages to Responses",
+      ["gpt-test", "claude-test", "gpt-test"],
+    ],
+    [
+      "Messages to Responses to Messages",
+      ["claude-test", "gpt-test", "claude-test"],
+    ],
+  ] as const) {
+    test(`round-trips retained client history from ${name}`, async () => {
+      state.models = {
+        object: "list",
+        data: [
+          {
+            capabilities: { limits: { max_prompt_tokens: 128000 } },
+            id: "gpt-test",
+            supported_endpoints: ["/responses"],
+          },
+          {
+            capabilities: { limits: { max_prompt_tokens: 128000 } },
+            id: "claude-test",
+            supported_endpoints: ["/v1/messages"],
+          },
+        ],
+      } as typeof state.models
+      createResponses.mockImplementation((payload) =>
+        Promise.resolve(
+          createReasoningResult(payload.model, "rs_native", "native-reasoning"),
+        ),
+      )
+      const handleMessages = mock(
+        (_context: Context, _payload: AnthropicMessagesPayload) =>
+          Promise.resolve(
+            createMessagesResponse([
+              {
+                type: "thinking",
+                thinking: "Messages reasoning",
+                signature: "messages-reasoning",
+              },
+              { type: "text", text: "Answer from claude-test" },
+            ]),
+          ),
+      )
+      responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+      const history: Array<unknown> = []
+      for (const [index, model] of models.entries()) {
+        history.push({
+          role: "user",
+          type: "message",
+          content: `Turn ${index + 1}`,
+        })
+        const response = await createApp().request("/v1/responses", {
+          body: JSON.stringify({ model, input: history }),
+          headers: {
+            "content-type": "application/json",
+            "session-id": "round-trip-session",
+          },
+          method: "POST",
+        })
+
+        expect(response.status).toBe(200)
+        const result = (await response.json()) as ResponsesResult
+        history.push(...result.output)
+      }
+
+      if (models[0] === "gpt-test") {
+        const replayedInput = createResponses.mock.calls[1]?.[0].input
+        expect(
+          Array.isArray(replayedInput) ?
+            replayedInput
+              .filter((item) => item.type === "reasoning")
+              .map((item) => item.encrypted_content)
+          : [],
+        ).toEqual(["native-reasoning"])
+        expect(
+          getThinkingSignatures(handleMessages.mock.calls[0]?.[1]),
+        ).toEqual([])
+      } else {
+        const switchedInput = createResponses.mock.calls[0]?.[0].input
+        expect(
+          Array.isArray(switchedInput)
+            && switchedInput.some((item) => item.type === "reasoning"),
+        ).toBe(false)
+        expect(
+          getThinkingSignatures(handleMessages.mock.calls[1]?.[1]),
+        ).toEqual(["messages-reasoning"])
+      }
+    })
+  }
 })
 
 describe("responses handler token usage", () => {
@@ -525,6 +769,89 @@ describe("responses handler token usage", () => {
     expect(handleMessages).toHaveBeenCalledTimes(1)
   })
 
+  test("injects tool call tips into the Messages adapter only for Codex clients", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-tips",
+          model_picker_enabled: true,
+          name: "Claude Tips",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/v1/messages"],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    }
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          Response.json({
+            content: [{ type: "text", text: "hi" }],
+            id: "msg-tips",
+            model: "claude-tips",
+            role: "assistant",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            type: "message",
+            usage: { input_tokens: 4, output_tokens: 2 },
+          }),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const app = createApp()
+    const codexResponse = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-tips",
+        instructions: "Base instructions",
+        input: "hello",
+      }),
+      headers: {
+        "content-type": "application/json",
+        "user-agent": "codex-cli/1.0.0",
+      },
+      method: "POST",
+    })
+    const otherResponse = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-tips",
+        instructions: "Base instructions",
+        input: "hello",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(codexResponse.status).toBe(200)
+    expect(otherResponse.status).toBe(200)
+    expect(handleMessages).toHaveBeenCalledTimes(2)
+    expect(handleMessages.mock.calls[0]?.[1].system).toEqual([
+      {
+        type: "text",
+        text: `Base instructions\n\n${MESSAGES_TOOL_CALL_TIPS}`,
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+    expect(handleMessages.mock.calls[1]?.[1].system).toEqual([
+      {
+        type: "text",
+        text: "Base instructions",
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+  })
+
   test("rejects models without fallback endpoints for non-Codex clients", async () => {
     state.models = {
       object: "list",
@@ -673,6 +1000,198 @@ describe("responses handler token usage", () => {
     expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
   })
 
+  test("normalizes unsupported max reasoning effort to the highest supported level", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: { max_prompt_tokens: 128000 },
+            supports: {
+              reasoning_effort: ["low", "medium", "high", "xhigh"],
+            },
+          },
+          id: "gpt-capability-test",
+          supported_endpoints: ["/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-capability-test",
+        reasoning: { effort: "max" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].reasoning).toEqual({
+      effort: "xhigh",
+    })
+  })
+
+  test("maps ultra reasoning effort to max when max is supported", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: { max_prompt_tokens: 128000 },
+            supports: {
+              reasoning_effort: [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+              ],
+            },
+          },
+          id: "gpt-ultra-capability",
+          supported_endpoints: ["/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-ultra-capability",
+        reasoning: { effort: "ultra" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].reasoning).toEqual({
+      effort: "max",
+    })
+  })
+
+  test("preserves max reasoning effort when capabilities are unknown", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-test",
+        reasoning: { effort: "max" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].reasoning).toEqual({
+      effort: "max",
+    })
+  })
+
+  test("maps ultra reasoning effort to max when capabilities are unknown", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-test",
+        reasoning: { effort: "ultra" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].reasoning).toEqual({
+      effort: "max",
+    })
+  })
+
+  test("preserves unknown reasoning effort for upstream validation", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-test",
+        reasoning: { effort: "turbo" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(
+      (createResponses.mock.calls[0][0].reasoning as { effort?: string })
+        ?.effort,
+    ).toBe("turbo")
+  })
+
+  test("preserves supported max reasoning effort for native Responses", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: { max_prompt_tokens: 128000 },
+            supports: {
+              reasoning_effort: [
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+              ],
+            },
+          },
+          id: "gpt-max-capability",
+          supported_endpoints: ["/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-max-capability",
+        reasoning: { effort: "max" },
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].reasoning).toEqual({
+      effort: "max",
+    })
+  })
+
   for (const [transport, supportedEndpoints] of [
     ["http", ["/responses"]],
     ["websocket", ["/responses", "ws:/responses"]],
@@ -712,7 +1231,7 @@ describe("responses handler token usage", () => {
       expect(response.status).toBe(200)
       expect(createResponses).toHaveBeenCalledTimes(1)
       expect(createResponses.mock.calls[0][1]?.transport).toBe(transport)
-      expect(createResponses.mock.calls[0][1]?.signal).toBeInstanceOf(
+      expect(createResponses.mock.calls[0][1]?.clientSignal).toBeInstanceOf(
         AbortSignal,
       )
       expect(createResponses.mock.calls[0][0].input).toEqual([
@@ -1491,5 +2010,75 @@ describe("responses handler token usage", () => {
     expect(page.items[0]?.output_tokens).toBe(2)
     expect(page.items[0]?.total_nano_aiu).toBe(1234)
     expect(page.items[0]?.total_tokens).toBe(7)
+  })
+})
+
+describe("responses handler interrupted streams", () => {
+  test("delivers failure events when the Messages stream ends before initialization", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            family: "claude",
+            limits: { max_prompt_tokens: 128000 },
+            object: "model_capabilities",
+            supports: { tool_calls: true },
+            tokenizer: "o200k_base",
+            type: "chat",
+          },
+          id: "claude-test",
+          model_picker_enabled: true,
+          name: "Claude Test",
+          object: "model",
+          preview: false,
+          supported_endpoints: ["/v1/messages"],
+          vendor: "anthropic",
+          version: "test",
+        },
+      ],
+    } as typeof state.models
+    const handleMessages = mock(
+      (_context: Context, _payload: AnthropicMessagesPayload) =>
+        Promise.resolve(
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.close()
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+        ),
+    )
+    responsesMessagesDependencies.handleCompletionPayload = handleMessages
+
+    const response = await createApp().request("/v1/responses", {
+      body: JSON.stringify({
+        model: "claude-test",
+        input: [{ role: "user", type: "message", content: "hi" }],
+        stream: true,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get("content-type") ?? "").toContain(
+      "text/event-stream",
+    )
+
+    const body = await response.text()
+    const events = body
+      .split("\n")
+      .filter((line) => line.startsWith("data: "))
+      .map((line) => JSON.parse(line.slice(6)) as { type: string })
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "error",
+      "response.failed",
+    ])
   })
 })

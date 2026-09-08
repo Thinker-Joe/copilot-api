@@ -4,6 +4,12 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
+import type { ProviderConfig, ResolvedProviderConfig } from "~/lib/config"
+import {
+  ensureConfiguredProviderModelAlias,
+  resolveConfiguredProviderModelAlias,
+} from "~/lib/provider-resolver"
+
 interface CodexCredentialsShape {
   accessToken: string
   accountId: string
@@ -12,14 +18,7 @@ interface CodexCredentialsShape {
 }
 
 interface ConfigFileShape {
-  providers?: {
-    codex?: {
-      type?: string
-      enabled?: boolean
-      baseUrl?: string
-      authType?: string
-    }
-  }
+  providers?: Record<string, ProviderConfig>
 }
 
 const cwd = fileURLToPath(new URL("../", import.meta.url))
@@ -190,5 +189,76 @@ describe("provider resolver", () => {
       authType: "oauth2",
       baseUrl: "https://chatgpt.com/backend-api",
     })
+  })
+
+  test("resolves azure-entra providers with an Azure access token", () => {
+    const tempDir = createTempDir()
+    writeConfigFile(tempDir, {
+      providers: {
+        foundry: {
+          type: "openai-compatible",
+          authType: "azure-entra",
+          baseUrl: "https://example.openai.azure.com/openai",
+        },
+      },
+    })
+
+    const output = runScript(
+      tempDir,
+      'const { resolveProviderConfig } = await import("./src/lib/provider-resolver"); console.log(JSON.stringify(await resolveProviderConfig("foundry", async () => "entra-access-token")));',
+    )
+
+    expect(JSON.parse(output)).toMatchObject({
+      apiKey: "entra-access-token",
+      authType: "azure-entra",
+      baseUrl: "https://example.openai.azure.com/openai",
+      name: "foundry",
+      type: "openai-compatible",
+    })
+  })
+})
+
+describe("configured provider/model alias helpers", () => {
+  const configuredResolver = () => Promise.resolve({} as ResolvedProviderConfig)
+  const missingResolver = () => Promise.resolve(null)
+
+  test("returns null without calling the resolver for plain model ids", async () => {
+    let calls = 0
+    const countingResolver = (_providerName: string) => {
+      calls += 1
+      return Promise.resolve(null)
+    }
+
+    expect(
+      await resolveConfiguredProviderModelAlias("gpt-5-mini", countingResolver),
+    ).toBeNull()
+    expect(
+      await ensureConfiguredProviderModelAlias(null, countingResolver),
+    ).toBeNull()
+    expect(calls).toBe(0)
+  })
+
+  test("returns the alias when the provider is configured", async () => {
+    expect(
+      await resolveConfiguredProviderModelAlias(
+        "dash/qwen-plus",
+        configuredResolver,
+      ),
+    ).toEqual({ provider: "dash", model: "qwen-plus" })
+  })
+
+  test("returns null when the provider is not configured", async () => {
+    expect(
+      await resolveConfiguredProviderModelAlias(
+        "contoso/glm-5.2",
+        missingResolver,
+      ),
+    ).toBeNull()
+    expect(
+      await ensureConfiguredProviderModelAlias(
+        { provider: "contoso", model: "family/glm-5.2" },
+        missingResolver,
+      ),
+    ).toBeNull()
   })
 })

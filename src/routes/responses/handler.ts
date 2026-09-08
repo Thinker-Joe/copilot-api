@@ -8,9 +8,13 @@ import {
 } from "~/lib/config"
 import { createHandlerLogger, debugJson, debugJsonTail } from "~/lib/logger"
 import { findEndpointModel } from "~/lib/models"
-import { parseProviderModelAlias } from "~/lib/provider-model"
+import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
+import { writeSSEIfConnected } from "~/lib/sse"
 import { isCodexUserAgent } from "~/routes/models/codex-models"
-import { handleProviderResponsesForProvider } from "~/routes/provider/responses/handler"
+import {
+  handleProviderResponsesForProvider,
+  providerResponsesHandlerDependencies,
+} from "~/routes/provider/responses/handler"
 import {
   createCopilotTokenUsageRecorder,
   normalizeOptionalToken,
@@ -36,8 +40,11 @@ import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   applyResponsesApiContextManagement,
   compactInputByLatestCompaction,
+  filterReasoningForTransport,
   getResponsesTransportForModel,
   getResponsesRequestOptions,
+  normalizeInputImageDetails,
+  normalizeResponsesReasoningEffort,
   sanitizeOversizedInputImages,
   sanitizeUnsupportedInputFields,
 } from "./utils"
@@ -62,7 +69,10 @@ export const handleResponses = async (c: Context) => {
     )
   }
 
-  const providerModelAlias = parseProviderModelAlias(payload.model)
+  const providerModelAlias = await resolveConfiguredProviderModelAlias(
+    payload.model,
+    providerResponsesHandlerDependencies.resolveProviderConfig,
+  )
   if (providerModelAlias) {
     payload.model = providerModelAlias.model
     return await handleProviderResponsesForProvider(c, {
@@ -93,6 +103,15 @@ export const handleResponses = async (c: Context) => {
     payload.model,
   )
   payload.model = selectedModel?.id ?? payload.model
+  const normalizedReasoningEffort = normalizeResponsesReasoningEffort(
+    payload,
+    selectedModel?.capabilities?.supports?.reasoning_effort,
+  )
+  if (normalizedReasoningEffort) {
+    logger.debug(
+      `Normalized reasoning effort from ${normalizedReasoningEffort.from} to ${normalizedReasoningEffort.to} based on the selected model capabilities`,
+    )
+  }
   const responsesTransport = getResponsesTransportForModel(selectedModel)
 
   const useMessagesFallback = shouldFallbackToMessages(
@@ -102,6 +121,7 @@ export const handleResponses = async (c: Context) => {
     responsesTransport,
   )
   if (useMessagesFallback) {
+    filterReasoningForTransport(payload, true)
     return await handleResponsesViaMessages(c, {
       payload,
       publicModel: requestedModel,
@@ -125,6 +145,8 @@ export const handleResponses = async (c: Context) => {
     )
   }
 
+  filterReasoningForTransport(payload, false)
+
   const recordUsage = createCopilotTokenUsageRecorder({
     endpoint: "responses",
     fallbackSessionId,
@@ -135,6 +157,13 @@ export const handleResponses = async (c: Context) => {
   if (sanitizedUnsupportedFieldCount > 0) {
     logger.debug(
       `Removed ${sanitizedUnsupportedFieldCount} unsupported input field(s) before forwarding to Copilot Responses`,
+    )
+  }
+
+  const normalizedImageDetailCount = normalizeInputImageDetails(payload)
+  if (normalizedImageDetailCount > 0) {
+    logger.debug(
+      `Normalized ${normalizedImageDetailCount} unsupported input image detail value(s) before forwarding to Copilot Responses`,
     )
   }
 
@@ -181,7 +210,7 @@ export const handleResponses = async (c: Context) => {
     subagentMarker,
     requestId,
     sessionId: fallbackSessionId,
-    signal: c.req.raw.signal,
+    clientSignal: c.req.raw.signal,
     transport: responsesTransport,
   })
 
@@ -217,7 +246,7 @@ export const handleResponses = async (c: Context) => {
             idTracker,
           )
 
-          await stream.writeSSE({
+          await writeSSEIfConnected(stream, {
             id: (chunk as { id?: string }).id,
             event: (chunk as { event?: string }).event,
             data: processedData,

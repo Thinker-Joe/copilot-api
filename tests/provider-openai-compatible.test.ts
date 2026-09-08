@@ -73,6 +73,34 @@ const createApp = () => {
   return app
 }
 
+const createSseStreamResponse = (chunks: Array<Record<string, unknown>>) =>
+  new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder()
+        for (const chunk of chunks) {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
+          )
+        }
+        // The upstream connection drops here: no [DONE] sentinel.
+        controller.close()
+      },
+    }),
+    {
+      headers: { "content-type": "text/event-stream; charset=utf-8" },
+    },
+  )
+
+const parseSseData = (text: string): Array<Record<string, unknown>> =>
+  text
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+    .map(
+      (line) =>
+        JSON.parse(line.slice("data: ".length)) as Record<string, unknown>,
+    )
+
 beforeEach(() => {
   providerConfig = {
     name: "dashscope",
@@ -267,6 +295,101 @@ describe("openai-compatible provider messages", () => {
     expect(body.stream_options).toEqual({
       include_usage: true,
     })
+  })
+
+  test("emits an Anthropic error event when the stream breaks during thinking output", async () => {
+    const thinkingChunk = {
+      id: "chatcmpl-thinking-cut",
+      object: "chat.completion.chunk",
+      created: 0,
+      model: "qwen-plus",
+      choices: [
+        {
+          index: 0,
+          delta: { reasoning_content: "partial thought" },
+          finish_reason: null,
+          logprobs: null,
+        },
+      ],
+    }
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(createSseStreamResponse([thinkingChunk])),
+    )
+
+    const app = createApp()
+    const response = await app.request("/dash/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "qwen-plus",
+        stream: true,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const events = parseSseData(await response.text())
+    const eventTypes = events.map((event) => event.type)
+
+    expect(eventTypes).toContain("message_start")
+    expect(eventTypes).toContain("content_block_delta")
+    expect(eventTypes).not.toContain("message_stop")
+    expect(events.at(-1)).toEqual({
+      type: "error",
+      error: {
+        message:
+          "An unexpected error occurred during streaming, retry your request.",
+        type: "api_error",
+      },
+    })
+  })
+
+  test("emits an Anthropic error event when the upstream stream fails", async () => {
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error("upstream connection reset"))
+            },
+          }),
+          {
+            headers: { "content-type": "text/event-stream; charset=utf-8" },
+          },
+        ),
+      ),
+    )
+
+    const app = createApp()
+    const response = await app.request("/dash/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "qwen-plus",
+        stream: true,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const events = parseSseData(await response.text())
+
+    expect(events).toEqual([
+      {
+        type: "error",
+        error: {
+          message:
+            "An unexpected error occurred during streaming, retry your request.",
+          type: "api_error",
+        },
+      },
+    ])
   })
 
   test("allows extraBody to disable parallel tool calls", async () => {
@@ -542,6 +665,349 @@ describe("openai-compatible provider message content", () => {
     })
     expect(body.messages[1]).not.toHaveProperty("reasoning_text")
     expect(body.messages[1]).not.toHaveProperty("reasoning_opaque")
+    expect(body.messages[1]).not.toHaveProperty("reasoning")
+  })
+})
+
+describe("opencode-go reasoning compatibility", () => {
+  const useOpencodeGoProvider = () => {
+    providerConfig = {
+      name: "opencode-go",
+      type: "openai-compatible",
+      baseUrl: "https://opencode.ai/zen/go",
+      apiKey: "provider-key",
+      authType: "authorization",
+      models: {
+        "hy4-preview": {
+          toolContentSupportType: [],
+        },
+      },
+    }
+  }
+
+  test("translates reasoning deltas to Anthropic thinking events", async () => {
+    useOpencodeGoProvider()
+    const reasoningChunk = {
+      id: "gen-1788267775-qTbelOO6wDJXzNXu9Hej",
+      object: "chat.completion.chunk",
+      created: 1788267775,
+      model: "hy4-preview",
+      choices: [
+        {
+          index: 0,
+          finish_reason: null,
+          delta: {
+            role: "assistant",
+            content: "",
+            reasoning: "thinking...",
+            reasoning_details: [
+              {
+                type: "reasoning.text",
+                text: "thinking...",
+                format: "unknown",
+                index: 0,
+              },
+            ],
+          },
+        },
+      ],
+    }
+    const contentChunk = {
+      id: "gen-1788267775-qTbelOO6wDJXzNXu9Hej",
+      object: "chat.completion.chunk",
+      created: 1788267775,
+      model: "hy4-preview",
+      choices: [
+        {
+          index: 0,
+          finish_reason: null,
+          delta: { content: "answer" },
+        },
+      ],
+    }
+    const doneChunk = {
+      id: "gen-1788267775-qTbelOO6wDJXzNXu9Hej",
+      object: "chat.completion.chunk",
+      created: 1788267775,
+      model: "hy4-preview",
+      choices: [{ index: 0, finish_reason: "stop", delta: {} }],
+      usage: {
+        prompt_tokens: 8,
+        completion_tokens: 3,
+        total_tokens: 11,
+      },
+    }
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        createSseStreamResponse([reasoningChunk, contentChunk, doneChunk]),
+      ),
+    )
+
+    const app = createApp()
+    const response = await app.request("/opencode-go/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "hy4-preview",
+        stream: true,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const events = parseSseData(await response.text())
+    const eventTypes = events.map((event) => event.type)
+
+    expect(eventTypes).toContain("message_start")
+    expect(eventTypes).toContain("message_stop")
+
+    const blockStarts = events.filter(
+      (event) => event.type === "content_block_start",
+    )
+    expect(
+      blockStarts.map(
+        (event) => (event.content_block as Record<string, unknown>).type,
+      ),
+    ).toEqual(["thinking", "text"])
+
+    const thinkingDeltas = events.filter(
+      (event) =>
+        event.type === "content_block_delta"
+        && (event.delta as Record<string, unknown>).type === "thinking_delta",
+    )
+    expect(thinkingDeltas).toHaveLength(1)
+    expect((thinkingDeltas[0].delta as Record<string, unknown>).thinking).toBe(
+      "thinking...",
+    )
+
+    const textDeltas = events.filter(
+      (event) =>
+        event.type === "content_block_delta"
+        && (event.delta as Record<string, unknown>).type === "text_delta",
+    )
+    expect(textDeltas).toHaveLength(1)
+    expect((textDeltas[0].delta as Record<string, unknown>).text).toBe("answer")
+  })
+
+  test("translates non-stream reasoning message to an Anthropic thinking block", async () => {
+    useOpencodeGoProvider()
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id: "gen-1788267775",
+            object: "chat.completion",
+            created: 1788267775,
+            model: "hy4-preview",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  reasoning: "thinking text",
+                  content: "answer text",
+                },
+                finish_reason: "stop",
+                logprobs: null,
+              },
+            ],
+            usage: {
+              prompt_tokens: 8,
+              completion_tokens: 2,
+              total_tokens: 10,
+            },
+          }),
+          {
+            headers: {
+              "content-type": "application/json",
+            },
+          },
+        ),
+      ),
+    )
+
+    const app = createApp()
+    const response = await app.request("/opencode-go/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [{ role: "user", content: "hello" }],
+        model: "hy4-preview",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const json = (await response.json()) as Record<string, unknown>
+    expect(json.content).toEqual([
+      {
+        type: "thinking",
+        thinking: "thinking text",
+        signature: "",
+      },
+      {
+        type: "text",
+        text: "answer text",
+      },
+    ])
+  })
+
+  test("sends assistant thinking history with the reasoning field", async () => {
+    useOpencodeGoProvider()
+    const app = createApp()
+    const response = await app.request("/opencode-go/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [
+          {
+            role: "user",
+            content: "first",
+          },
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "previous thinking",
+                signature: "",
+              },
+              {
+                type: "text",
+                text: "previous answer",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: "continue",
+          },
+        ],
+        model: "hy4-preview",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as {
+      messages: Array<Record<string, unknown>>
+    }
+    expect(body.messages[1]).toMatchObject({
+      reasoning: "previous thinking",
+      role: "assistant",
+    })
+    expect(body.messages[1]).not.toHaveProperty("reasoning_content")
+    expect(body.messages[1]).not.toHaveProperty("reasoning_text")
+    expect(body.messages[1]).not.toHaveProperty("reasoning_opaque")
+  })
+
+  test("omits the reasoning field for opencode-go models without the flag", async () => {
+    useOpencodeGoProvider()
+    const app = createApp()
+    const response = await app.request("/opencode-go/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "previous thinking",
+                signature: "",
+              },
+              {
+                type: "text",
+                text: "previous answer",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: "continue",
+          },
+        ],
+        model: "glm-5.2",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as {
+      messages: Array<Record<string, unknown>>
+    }
+    expect(body.messages[0]).toMatchObject({
+      reasoning_content: "previous thinking",
+      role: "assistant",
+    })
+    expect(body.messages[0]).not.toHaveProperty("reasoning")
+  })
+
+  test("sends the reasoning field when enabled in custom model config", async () => {
+    providerConfig = {
+      ...providerConfig,
+      models: {
+        "qwen-plus": {
+          reasoningField: "reasoning",
+          toolContentSupportType: [],
+        },
+      },
+    } as ResolvedProviderConfig
+
+    const app = createApp()
+    const response = await app.request("/dash/v1/messages", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        max_tokens: 128,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "thinking",
+                thinking: "previous thinking",
+                signature: "",
+              },
+              {
+                type: "text",
+                text: "previous answer",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: "continue",
+          },
+        ],
+        model: "qwen-plus",
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    const body = JSON.parse(init.body as string) as {
+      messages: Array<Record<string, unknown>>
+    }
+    expect(body.messages[0]).toMatchObject({
+      reasoning: "previous thinking",
+      role: "assistant",
+    })
+    expect(body.messages[0]).not.toHaveProperty("reasoning_content")
   })
 })
 

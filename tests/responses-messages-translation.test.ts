@@ -10,6 +10,7 @@ import {
   decodeMessagesCompaction,
   encodeMessagesCompaction,
   MESSAGES_COMPACTION_PREFIX,
+  MESSAGES_TOOL_CALL_TIPS,
   ResponsesMessagesTranslationError,
   translateAnthropicToResponses,
   translateResponsesToMessages,
@@ -19,11 +20,17 @@ import {
   translateMessagesStream,
 } from "~/routes/responses/messages-stream-translation"
 
-const translate = (payload: Omit<ResponsesPayload, "model">) =>
+const translate = (
+  payload: Omit<ResponsesPayload, "model">,
+  options?: { toolCallTips?: boolean },
+) =>
   translateResponsesToMessages(
     { model: "claude-sonnet-4.6", ...payload },
-    { model: "claude-sonnet-4.6" },
+    { model: "claude-sonnet-4.6", ...options },
   )
+
+const translateWithTips = (payload: Omit<ResponsesPayload, "model">) =>
+  translate(payload, { toolCallTips: true })
 
 const expectCanonicalBase64 = (value: string | undefined) => {
   expect(value).toBeTruthy()
@@ -32,6 +39,12 @@ const expectCanonicalBase64 = (value: string | undefined) => {
 }
 
 describe("Responses Lite to Messages translation", () => {
+  test("includes yielded execution resume guidance in tool call tips", () => {
+    expect(MESSAGES_TOOL_CALL_TIPS).toContain(
+      "- Yielded execution is not truncated output. Resume a running `cell_id` with `functions.wait`, and a live `session_id` with `tools.write_stdin`, until the command reaches a terminal result.",
+    )
+  })
+
   test("prefers request session affinity for metadata user id", () => {
     const result = requestContext.run(
       {
@@ -95,7 +108,7 @@ describe("Responses Lite to Messages translation", () => {
   })
 
   test("groups the first five developer prompts into two system blocks", () => {
-    const result = translate({
+    const result = translateWithTips({
       instructions: "Base instructions",
       input: [
         { role: "developer", content: "Developer one", type: "message" },
@@ -121,13 +134,16 @@ describe("Responses Lite to Messages translation", () => {
       { type: "text", text: "Developer one" },
       {
         type: "text",
-        text: [
-          "Developer two, part one",
-          "Developer two, part two",
-          "Developer three",
-          "Developer four",
-          "Developer five",
-        ].join("\n\n"),
+        text:
+          [
+            "Developer two, part one",
+            "Developer two, part two",
+            "Developer three",
+            "Developer four",
+            "Developer five",
+          ].join("\n\n")
+          + "\n\n"
+          + MESSAGES_TOOL_CALL_TIPS,
         cache_control: { type: "ephemeral" },
       },
     ])
@@ -146,8 +162,8 @@ describe("Responses Lite to Messages translation", () => {
     ])
   })
 
-  test("adds ephemeral cache_control to the last system block and the last message tail", () => {
-    const result = translate({
+  test("adds ephemeral cache_control to the last system block and the tail block of the last user message", () => {
+    const result = translateWithTips({
       instructions: "Base instructions",
       input: [
         { role: "user", content: "First user message", type: "message" },
@@ -165,7 +181,7 @@ describe("Responses Lite to Messages translation", () => {
     expect(result.messagesPayload.system).toEqual([
       {
         type: "text",
-        text: "Base instructions",
+        text: `Base instructions\n\n${MESSAGES_TOOL_CALL_TIPS}`,
         cache_control: { type: "ephemeral" },
       },
     ])
@@ -185,6 +201,51 @@ describe("Responses Lite to Messages translation", () => {
     ])
   })
 
+  test("appends tool call tips to string input when enabled", () => {
+    const result = translate(
+      { instructions: "Base instructions", input: "Hello" },
+      { toolCallTips: true },
+    )
+
+    expect(result.messagesPayload.system).toEqual([
+      {
+        type: "text",
+        text: `Base instructions\n\n${MESSAGES_TOOL_CALL_TIPS}`,
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+  })
+
+  test("omits tool call tips unless enabled", () => {
+    const result = translate({
+      instructions: "Base instructions",
+      input: [{ role: "user", content: "Hello", type: "message" }],
+    })
+
+    expect(result.messagesPayload.system).toEqual([
+      {
+        type: "text",
+        text: "Base instructions",
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+  })
+
+  test("adds a dedicated system block for tool call tips when no prompt exists", () => {
+    const result = translate(
+      { input: [{ role: "user", content: "Hello", type: "message" }] },
+      { toolCallTips: true },
+    )
+
+    expect(result.messagesPayload.system).toEqual([
+      {
+        type: "text",
+        text: MESSAGES_TOOL_CALL_TIPS,
+        cache_control: { type: "ephemeral" },
+      },
+    ])
+  })
+
   test("leaves a trailing empty content array without cache_control", () => {
     const result = translate({
       input: [{ role: "user", content: [], type: "message" }],
@@ -195,7 +256,7 @@ describe("Responses Lite to Messages translation", () => {
     ])
   })
 
-  test("does not mark a trailing thinking block with cache_control", () => {
+  test("marks the final user message even when a thinking block trails", () => {
     const result = translate({
       input: [
         { role: "user", content: "What is 2 + 2?", type: "message" },
@@ -209,7 +270,16 @@ describe("Responses Lite to Messages translation", () => {
     })
 
     expect(result.messagesPayload.messages).toEqual([
-      { role: "user", content: "What is 2 + 2?" },
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "What is 2 + 2?",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
       {
         role: "assistant",
         content: [
@@ -229,7 +299,7 @@ describe("Responses Lite to Messages translation", () => {
   })
 
   test("converts developer messages after the first user to user messages", () => {
-    const result = translate({
+    const result = translateWithTips({
       input: [
         { role: "developer", content: "Initial developer", type: "message" },
         { role: "user", content: "First user message", type: "message" },
@@ -254,7 +324,7 @@ describe("Responses Lite to Messages translation", () => {
     expect(result.messagesPayload.system).toEqual([
       {
         type: "text",
-        text: "Initial developer",
+        text: `Initial developer\n\n${MESSAGES_TOOL_CALL_TIPS}`,
         cache_control: { type: "ephemeral" },
       },
     ])
@@ -290,7 +360,7 @@ describe("Responses Lite to Messages translation", () => {
   })
 
   test("translates agent messages and later developer messages to user", () => {
-    const result = translate({
+    const result = translateWithTips({
       input: [
         { role: "developer", content: "Initial developer", type: "message" },
         {
@@ -313,7 +383,7 @@ describe("Responses Lite to Messages translation", () => {
     expect(result.messagesPayload.system).toEqual([
       {
         type: "text",
-        text: "Initial developer",
+        text: `Initial developer\n\n${MESSAGES_TOOL_CALL_TIPS}`,
         cache_control: { type: "ephemeral" },
       },
     ])
@@ -339,7 +409,7 @@ describe("Responses Lite to Messages translation", () => {
   })
 
   test("keeps initial developer prompts when replaying a compaction", () => {
-    const result = translate({
+    const result = translateWithTips({
       input: [
         { role: "developer", content: "Developer one", type: "message" },
         { role: "developer", content: "Developer two", type: "message" },
@@ -356,7 +426,7 @@ describe("Responses Lite to Messages translation", () => {
       { type: "text", text: "Developer one" },
       {
         type: "text",
-        text: "Developer two",
+        text: `Developer two\n\n${MESSAGES_TOOL_CALL_TIPS}`,
         cache_control: { type: "ephemeral" },
       },
     ])
@@ -442,6 +512,79 @@ describe("Responses Lite to Messages translation", () => {
     ])
   })
 
+  test("does not synthesize tools from undeclared tool call history", () => {
+    const result = translate({
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_00_ET_DM1gjjhO7owedlK9BQF94440",
+          name: "functions__view_image",
+          arguments: JSON.stringify({
+            path: "D:\\bud\\copilot-api\\docs\\screenshots\\desktop-dashboard.png",
+          }),
+          status: "completed",
+        },
+      ],
+    })
+
+    expect(result.registry.tools).toEqual([])
+    expect(result.messagesPayload.tools).toBeUndefined()
+    expect(result.messagesPayload.messages).toEqual([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_00_ET_DM1gjjhO7owedlK9BQF94440",
+            name: "functions__view_image",
+            input: {
+              path: "D:\\bud\\copilot-api\\docs\\screenshots\\desktop-dashboard.png",
+            },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("marks the last user message when the conversation ends with an assistant tool call", () => {
+    const result = translate({
+      input: [
+        { role: "user", content: "Show the dashboard", type: "message" },
+        {
+          type: "function_call",
+          call_id: "call_00_ET_DM1gjjhO7owedlK9BQF94440",
+          name: "functions__view_image",
+          arguments: JSON.stringify({ path: "dashboard.png" }),
+          status: "completed",
+        },
+      ],
+    })
+
+    expect(result.messagesPayload.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "Show the dashboard",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "call_00_ET_DM1gjjhO7owedlK9BQF94440",
+            name: "functions__view_image",
+            input: { path: "dashboard.png" },
+          },
+        ],
+      },
+    ])
+  })
+
   test("merges input reasoning with the following assistant message", () => {
     const result = translate({
       input: [
@@ -481,6 +624,43 @@ describe("Responses Lite to Messages translation", () => {
             type: "text",
             text: "Thanks",
             cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("keeps an empty thinking text for reasoning items without a summary", () => {
+    const result = translate({
+      input: [
+        { role: "user", content: "What is 2 + 2?", type: "message" },
+        {
+          id: "reasoning-1",
+          type: "reasoning",
+          summary: [],
+          encrypted_content: "reasoning-signature",
+        },
+      ],
+    })
+
+    expect(result.messagesPayload.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "What is 2 + 2?",
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "thinking",
+            thinking: "",
+            signature: "reasoning-signature",
           },
         ],
       },
@@ -545,6 +725,71 @@ describe("Responses Lite to Messages translation", () => {
       namespace: "workspace",
       arguments: JSON.stringify({ path: "README.md" }),
     })
+  })
+
+  test("drops empty text parts from custom tool call outputs", () => {
+    const result = translate({
+      input: [
+        {
+          type: "custom_tool_call_output",
+          call_id: "call_50129f9955894d1790d490b0",
+          output: [
+            {
+              type: "input_text",
+              text: "Script completed\nWall time 1.3 seconds\nOutput:\n",
+            },
+            { type: "input_text", text: "" },
+          ],
+        },
+      ],
+    })
+
+    expect(result.messagesPayload.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call_50129f9955894d1790d490b0",
+            content: [
+              {
+                type: "text",
+                text: "Script completed\nWall time 1.3 seconds\nOutput:\n",
+              },
+            ],
+            is_error: false,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ])
+  })
+
+  test("falls back to empty text when tool call output parts are all empty", () => {
+    const result = translate({
+      input: [
+        {
+          type: "function_call_output",
+          call_id: "call-empty",
+          output: [{ type: "input_text", text: "" }],
+        },
+      ],
+    })
+
+    expect(result.messagesPayload.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call-empty",
+            content: "",
+            is_error: false,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      },
+    ])
   })
 
   test("keeps input tools when a compaction request trims older input", () => {
@@ -671,6 +916,35 @@ describe("Responses Lite to Messages translation", () => {
     ).toEqual({ effort: "max" })
   })
 
+  test("marks reasoning translated from a Messages response", () => {
+    const translation = translate({ input: "Explain the result" })
+    const result = translateAnthropicToResponses(
+      {
+        content: [
+          {
+            type: "thinking",
+            thinking: "Check the result.",
+            signature: "claude-signature",
+          },
+        ],
+        id: "msg_reasoning",
+        model: "claude-sonnet-4.6",
+        role: "assistant",
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        type: "message",
+        usage: { input_tokens: 8, output_tokens: 3 },
+      },
+      translation,
+    )
+
+    expect(result.output[0]).toMatchObject({
+      type: "reasoning",
+      encrypted_content: "claude-signature",
+    })
+    expect(result.output[0]?.id?.endsWith("__a1")).toBe(true)
+  })
+
   test("translates an apply_patch tool use back to a custom tool call", () => {
     const translation = translate({
       input: [
@@ -701,6 +975,7 @@ describe("Responses Lite to Messages translation", () => {
     }
 
     const result = translateAnthropicToResponses(response, translation)
+    expect(result.output[0]?.id).toMatch(/^ctc_/)
     expect(result.output).toMatchObject([
       {
         type: "custom_tool_call",
@@ -811,6 +1086,7 @@ describe("Responses Lite to Messages translation", () => {
       outputDone?.type === "response.output_item.done"
       && outputDone.item.type === "custom_tool_call"
     ) {
+      expect(outputDone.item.id).toMatch(/^ctc_/)
       expect(outputDone.item).toMatchObject({
         type: "custom_tool_call",
         name: "apply_patch",
@@ -889,6 +1165,8 @@ describe("Responses Lite to Messages translation", () => {
     })
 
     expect(reasoningItems).toHaveLength(4)
+    expect(new Set(reasoningItems.map((item) => item.id)).size).toBe(2)
+    expect(reasoningItems.every((item) => item.id.endsWith("__a1"))).toBe(true)
     expect(reasoningItems[0]?.encrypted_content).toBe("")
     expect(reasoningItems[1]?.encrypted_content).toBe("")
     expect(reasoningItems[2]?.encrypted_content).toBe("")
@@ -1188,6 +1466,124 @@ describe("Responses Lite to Messages translation", () => {
     expect(completed?.type).toBe("response.completed")
     if (completed?.type === "response.completed") {
       expect(completed.response.output).toEqual([])
+    }
+  })
+
+  test("fails the response when the stream breaks during thinking output", async () => {
+    const translation = translate({ input: "hello", stream: true })
+    const source = [
+      {
+        type: "message_start",
+        message: {
+          content: [],
+          id: "msg_thinking_cut",
+          model: "claude-sonnet-4.6",
+          role: "assistant",
+          stop_reason: null,
+          stop_sequence: null,
+          type: "message",
+          usage: { input_tokens: 2, output_tokens: 0 },
+        },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "thinking_delta", thinking: "partial thought" },
+      },
+      // The stream is interrupted here: no content_block_stop, no
+      // message_delta and no message_stop ever arrive.
+    ]
+    async function* chunks() {
+      await Promise.resolve()
+      for (const event of source) yield { data: JSON.stringify(event) }
+    }
+
+    const events: Array<ResponseStreamEvent> = []
+    for await (const event of translateMessagesStream(chunks(), translation)) {
+      events.push(event)
+    }
+
+    expect(events.some((event) => event.type === "response.completed")).toBe(
+      false,
+    )
+    const error = events.find((event) => event.type === "error")
+    expect(error?.type).toBe("error")
+    if (error?.type === "error") {
+      expect(error.message).toBe(
+        "Messages stream ended without a message_stop event",
+      )
+    }
+    const failed = events.at(-1)
+    expect(failed?.type).toBe("response.failed")
+    if (failed?.type === "response.failed") {
+      expect(failed.response.status).toBe("failed")
+    }
+  })
+
+  test("emits failure events when the stream ends before initialization", async () => {
+    const translation = translate({ input: "hello", stream: true })
+    async function* chunks() {
+      await Promise.resolve()
+      yield { data: "[DONE]" }
+    }
+
+    const events: Array<ResponseStreamEvent> = []
+    for await (const event of translateMessagesStream(chunks(), translation)) {
+      events.push(event)
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "error",
+      "response.failed",
+    ])
+    expect(events.map((event) => event.sequence_number)).toEqual([0, 1, 2, 3])
+    const error = events[2]
+    if (error?.type === "error") {
+      expect(error.message).toBe("Messages API returned an empty stream")
+    }
+    const failed = events[3]
+    if (failed?.type === "response.failed") {
+      expect(failed.response.status).toBe("failed")
+    }
+  })
+
+  test("emits failure events when upstream errors before initialization", async () => {
+    const translation = translate({ input: "hello", stream: true })
+    async function* chunks() {
+      await Promise.resolve()
+      yield {
+        data: JSON.stringify({
+          type: "error",
+          error: { type: "overloaded_error", message: "Overloaded" },
+        }),
+      }
+    }
+
+    const events: Array<ResponseStreamEvent> = []
+    for await (const event of translateMessagesStream(chunks(), translation)) {
+      events.push(event)
+    }
+
+    expect(events.map((event) => event.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "error",
+      "response.failed",
+    ])
+    const error = events[2]
+    if (error?.type === "error") {
+      expect(error.message).toBe("Overloaded")
+    }
+    const failed = events[3]
+    if (failed?.type === "response.failed") {
+      expect(failed.response.status).toBe("failed")
     }
   })
 })

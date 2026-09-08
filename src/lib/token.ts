@@ -15,7 +15,10 @@ import {
   type CodexCredentials,
 } from "~/lib/oauth/codex"
 import { CODEX_API_BASE_URL } from "~/services/codex/create-responses"
-import { getCopilotToken } from "~/services/github/get-copilot-token"
+import {
+  getCopilotToken,
+  type GetCopilotTokenResponse,
+} from "~/services/github/get-copilot-token"
 import { getCopilotUsage } from "~/services/github/get-copilot-usage"
 import { getDeviceCode } from "~/services/github/get-device-code"
 import { pollAccessToken } from "~/services/github/poll-access-token"
@@ -25,6 +28,22 @@ import { state } from "./state"
 
 let copilotRefreshLoopController: AbortController | null = null
 let codexRefreshLoopController: AbortController | null = null
+
+interface CopilotUserIdentity {
+  endpoints: { api: string }
+  login: string
+  token_based_billing?: boolean
+}
+
+export interface CopilotTokenDependencies {
+  getCopilotToken: () => Promise<GetCopilotTokenResponse>
+  getCopilotUsage: () => Promise<CopilotUserIdentity | null>
+}
+
+const defaultCopilotTokenDependencies: CopilotTokenDependencies = {
+  getCopilotToken,
+  getCopilotUsage,
+}
 
 export const stopCopilotRefreshLoop = () => {
   if (!copilotRefreshLoopController) {
@@ -97,7 +116,23 @@ export async function persistCodexCredentials(
   applyCodexCredentials(credentials)
 }
 
-export const setupCopilotToken = async () => {
+export const applyCopilotTokenResponse = (
+  response: GetCopilotTokenResponse,
+): void => {
+  state.copilotToken = response.token
+
+  // The token exchange response is authoritative for routing the token it just
+  // issued: `/copilot_internal/user` can disagree (e.g. enterprise seats via an
+  // org entitlement advertise the business host, while the issued token is
+  // bound to the enterprise host, causing 421 Misdirected Request).
+  if (response.endpoints?.api) {
+    state.copilotApiUrl = response.endpoints.api
+  }
+}
+
+export const setupCopilotToken = async (
+  dependencies: CopilotTokenDependencies = defaultCopilotTokenDependencies,
+) => {
   if (isOpencodeOauthApp()) {
     if (!state.githubToken) throw new Error(`opencode token not found`)
 
@@ -112,13 +147,13 @@ export const setupCopilotToken = async () => {
     return
   }
 
-  const { token, refresh_in } = await getCopilotToken()
-  state.copilotToken = token
+  const response = await dependencies.getCopilotToken()
+  applyCopilotTokenResponse(response)
 
   // Display the Copilot token to the screen
   consola.debug("GitHub Copilot Token fetched successfully!")
   if (state.showToken) {
-    consola.info("Copilot token:", token)
+    consola.info("Copilot token:", state.copilotToken)
   }
 
   stopCopilotRefreshLoop()
@@ -126,7 +161,7 @@ export const setupCopilotToken = async () => {
   const controller = new AbortController()
   copilotRefreshLoopController = controller
 
-  runCopilotRefreshLoop(refresh_in, controller.signal)
+  runCopilotRefreshLoop(response.refresh_in, controller.signal, dependencies)
     .catch(() => {
       consola.warn("Copilot token refresh loop stopped")
     })
@@ -204,6 +239,7 @@ export const getRefreshPollDelayMs = (
 const runCopilotRefreshLoop = async (
   refreshIn: number,
   signal: AbortSignal,
+  dependencies: Pick<CopilotTokenDependencies, "getCopilotToken">,
 ) => {
   let refreshAtMs = getRefreshDeadlineMs(refreshIn)
   let retryDelayMs = RETRY_REFRESH_DELAY_MS
@@ -218,13 +254,13 @@ const runCopilotRefreshLoop = async (
     consola.debug("Refreshing Copilot token")
 
     try {
-      const { token, refresh_in } = await getCopilotToken()
-      state.copilotToken = token
-      refreshAtMs = getRefreshDeadlineMs(refresh_in)
+      const response = await dependencies.getCopilotToken()
+      applyCopilotTokenResponse(response)
+      refreshAtMs = getRefreshDeadlineMs(response.refresh_in)
       retryDelayMs = RETRY_REFRESH_DELAY_MS
       consola.debug("Copilot token refreshed")
       if (state.showToken) {
-        consola.info("Refreshed Copilot token:", token)
+        consola.info("Refreshed Copilot token:", state.copilotToken)
       }
     } catch (error) {
       consola.error("Failed to refresh Copilot token:", error)
@@ -332,8 +368,13 @@ export async function setupGitHubToken(
   }
 }
 
-export async function logUser() {
-  const copilotUser = await getCopilotUsage()
+export async function logUser(
+  dependencies: Pick<
+    CopilotTokenDependencies,
+    "getCopilotUsage"
+  > = defaultCopilotTokenDependencies,
+) {
+  const copilotUser = await dependencies.getCopilotUsage()
   if (!copilotUser) {
     throw new Error("GitHub token not found")
   }
