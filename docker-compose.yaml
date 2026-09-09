@@ -1,5 +1,7 @@
 services:
   copilot-api:
+    # Stable container name: OpsHub tooling and records reference it by name.
+    container_name: copilot-api
     image: ${COPILOT_API_IMAGE:-copilot-api:local}
     build: .
     restart: unless-stopped
