@@ -17,7 +17,7 @@ docker compose ps
 
 使用强网关 Key。CLI 的 Key 参数可能出现在 shell 历史和进程列表中，只在可信主机上初始化，不要将真实 Key 粘贴到 issue 或日志。登录命令需要交互；也可以在未跟踪的 `.env` 中设置 `COPILOT_API_GITHUB_TOKEN`，它优先于旧变量 `GH_TOKEN`。不要把 Token 放到命令行，并限制环境文件的宿主机访问权限。
 
-默认镜像 `copilot-api:local` 从当前源码构建。使用支持本部署约定的已发布镜像时，将 `COPILOT_API_IMAGE` 设置为版本标签或摘要，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。不要假定旧镜像支持 `/data` 或新版入口脚本。本改动不调整仓库的镜像发布及标签策略。
+默认镜像 `copilot-api:local` 从当前源码构建。使用支持本部署约定的已发布镜像时，将 `COPILOT_API_IMAGE` 设置为版本标签或摘要，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。不要假定旧镜像支持 `/data` 或新版入口脚本。
 
 项目级命名卷 `copilot-api-data` 在容器重建和 `docker compose down` 后仍保留。**除非明确要删除数据，不要执行 `docker compose down -v`。** 升级时保持 Compose 项目名一致。Compose 使用只读根文件系统、可写临时文件系统、移除 capabilities、禁止提权和日志轮转；认证命令与服务使用相同的数据卷和限制。`XDG_CACHE_HOME` 指向 `/data/cache`，使 VSCode 设备 ID 保存在可写数据卷上；否则只读根文件系统会导致每次重建容器都生成临时设备 ID。
 
@@ -59,7 +59,7 @@ sudo chmod 700 "$DATA_DIR"
 
 递归修改所有权前检查解析后的实际路径。不要使用 `chmod 777`、修改无关目录或递归重写文件内容。Rootless Docker 和 user namespace remapping 需要对应的宿主机 UID 映射，不能照搬 rootful 示例。Docker Desktop 和 SELinux 主机也有不同的共享或标签要求。启动前使用预期的运行身份测试挂载。
 
-回滚时停止新服务，恢复受保护的备份、旧镜像和旧挂载定义。排障时不要删除当前状态。上游已有配置保护逻辑：除真正缺少配置文件外，其他错误向上传递而不是覆盖原配置；入口脚本额外在启动前提供明确的权限诊断。
+回滚时停止新服务，恢复受保护的备份、旧镜像和旧挂载定义。排障时不要删除当前状态。读取配置时，除文件不存在外，其他错误均会报告，不会按空配置处理。入口脚本还会在启动前检查数据目录访问权限和配置文件可读性。
 
 ## 端口、代理和健康检查
 

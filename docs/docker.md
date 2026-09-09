@@ -17,7 +17,7 @@ docker compose ps
 
 Choose a strong gateway key. The CLI key argument can appear in shell history and the process list: initialize it only on a trusted host. Never paste real keys into issues or logs. Login is interactive; alternatively set `COPILOT_API_GITHUB_TOKEN` in your untracked `.env`. It takes precedence over legacy `GH_TOKEN`. Avoid putting tokens on the command line and protect environment files with appropriate host permissions.
 
-The default `copilot-api:local` image is built from this checkout. To use a published image that supports this deployment contract, set `COPILOT_API_IMAGE` to its version tag or digest, then run `docker compose pull` and `docker compose up -d --no-build`. Do not assume older images support `/data` or this entrypoint. This change does not alter the repository's image publishing or tag policy.
+The default `copilot-api:local` image is built from this checkout. To use a published image that supports this deployment contract, set `COPILOT_API_IMAGE` to its version tag or digest, then run `docker compose pull` and `docker compose up -d --no-build`. Do not assume older images support `/data` or this entrypoint.
 
 The project-scoped `copilot-api-data` named volume survives container recreation and `docker compose down`. **Do not use `docker compose down -v` unless intentionally deleting your data.** Keep the same Compose project name when upgrading. Compose uses a read-only root filesystem, a writable temporary filesystem, dropped capabilities, no-new-privileges, and bounded logs. Authentication commands use the same volume and restrictions as the server. `XDG_CACHE_HOME` points at `/data/cache` so the VSCode device ID persists on the writable volume; without it, the read-only root filesystem forces an ephemeral device ID on every container recreation.
 
@@ -59,7 +59,7 @@ sudo chmod 700 "$DATA_DIR"
 
 Verify the resolved path before recursive ownership commands. Do not use `chmod 777`, change unrelated directories, or recursively rewrite file contents. Rootless Docker and user-namespace remapping require the corresponding host UID mapping; this rootful example does not apply unchanged. Docker Desktop and SELinux hosts have different sharing/label requirements. Test the mount with the intended runtime identity before starting.
 
-For rollback, stop the new service and restore the protected backup plus the old image and mount definition. Do not delete current state while investigating a failure. The existing upstream config-preservation behavior propagates errors other than a genuinely missing config rather than replacing existing configuration; the entrypoint adds a clear permission diagnostic before startup.
+For rollback, stop the new service and restore the protected backup plus the old image and mount definition. Do not delete current state while investigating a failure. Configuration read errors other than a missing file are reported rather than treated as an empty configuration. The entrypoint also checks data-directory access and configuration readability before startup.
 
 ## Ports, proxies and health
 
