@@ -1,25 +1,49 @@
 # Docker 部署
 
-镜像以非特权 `bun` 用户运行，持久化数据放在 `/data`，应用代码保持 root 所有。Compose 默认只向宿主机 `127.0.0.1` 发布端口。容器内仍监听 `0.0.0.0`，启动前必须配置网关 API Key；GitHub Token 不能替代网关 Key。
+镜像以非特权 `bun` 用户运行，应用代码仍由 root 所有。GitHub 认证数据、provider 配置和其他需要持久化的 gateway 状态存放在 `/data`。将持久化存储挂载到这里，才能在重建容器后保留这些数据。
+
+服务在容器内监听 `0.0.0.0:4141`，以支持 Docker 端口映射。Compose 默认只将该端口发布到宿主机的 `127.0.0.1`。这种非回环监听要求先配置网关 API Key，并将 CORS 限制为请求自身的同源地址；GitHub token 不能替代网关 Key。
 
 ## 首次安装
 
-在仓库根目录执行：
+以下 Compose 步骤用于全新安装。已有部署请先阅读[已有 bind mount 部署](#已有-bind-mount-部署)和[旧镜像迁移](#旧-root-镜像或旧路径迁移)。如果不使用 Compose，最小运行示例见 README 中的[直接使用 Docker 运行](../README.zh-CN.md#直接使用-docker-运行)。
+
+在仓库根目录创建 `.env`（已有文件时不要覆盖），构建镜像，并配置供 API 客户端使用的强网关 Key：
 
 ```sh
 cp .env.example .env
 docker compose build
 docker compose run --rm copilot-api auth keys --add YOUR_GATEWAY_API_KEY
+```
+
+接下来选择一种上游配置方式。如果需要交互式登录或配置 provider，执行：
+
+```sh
 docker compose run --rm copilot-api auth login
+```
+
+如果你已有 GitHub token，可以跳过这条命令，改为编辑 `.env`：
+
+```dotenv
+COPILOT_API_GITHUB_TOKEN=your_github_token_here
+```
+
+`COPILOT_API_GITHUB_TOKEN` 优先于旧变量 `GH_TOKEN`，后者仍可作为回退。二者提供的都是上游凭据，而不是网关 API Key。请限制 `.env` 的宿主机访问权限，不要将它提交到版本控制。`auth keys --add` 的 Key 参数可能出现在 shell 历史和进程列表中：只在可信主机上初始化，不要将真实 Key 粘贴到 issue 或日志。
+
+完成凭据配置后，启动服务：
+
+```sh
 docker compose up -d --no-build
 docker compose ps
 ```
 
-使用强网关 Key。CLI 的 Key 参数可能出现在 shell 历史和进程列表中，只在可信主机上初始化，不要将真实 Key 粘贴到 issue 或日志。登录命令需要交互；也可以在未跟踪的 `.env` 中设置 `COPILOT_API_GITHUB_TOKEN`，它优先于旧变量 `GH_TOKEN`。不要把 Token 放到命令行，并限制环境文件的宿主机访问权限。
+将 API 客户端连接到 `http://127.0.0.1:4141`，并使用前面配置的网关 Key。
 
-默认镜像 `copilot-api:local` 从当前源码构建。使用支持本部署约定的已发布镜像时，将 `COPILOT_API_IMAGE` 设置为版本标签或摘要，再执行 `docker compose pull` 和 `docker compose up -d --no-build`。不要假定旧镜像支持 `/data` 或新版入口脚本。
+默认镜像 `copilot-api:local` 从当前源码构建。本次改动之前发布的版本以 root 运行，并使用旧版 `/root/.local/share/copilot-api` 路径，因此不具备本部署约定；配合本 Compose 文件使用时，容器仍以 root 运行，并会在 `/data` 中写入 root 所属的文件。等新版本包含该约定后，再把 `COPILOT_API_IMAGE` 设置为对应版本标签或摘要，然后执行 `docker compose pull` 和 `docker compose up -d --no-build`。
 
-项目级命名卷 `copilot-api-data` 在容器重建和 `docker compose down` 后仍保留。**除非明确要删除数据，不要执行 `docker compose down -v`。** 升级时保持 Compose 项目名一致。Compose 使用只读根文件系统、可写临时文件系统、移除 capabilities、禁止提权和日志轮转；认证命令与服务使用相同的数据卷和限制。`XDG_CACHE_HOME` 指向 `/data/cache`，使 VSCode 设备 ID 保存在可写数据卷上；否则只读根文件系统会导致每次重建容器都生成临时设备 ID。
+Compose 将项目级命名卷 `copilot-api-data` 挂载到 `/data`。它是 Docker 管理的存储，**不是**宿主机的 `./copilot-data` 目录。重建容器或执行 `docker compose down` 后，卷中的数据仍会保留。**除非明确要删除数据，不要执行 `docker compose down -v`。** 升级时保持 Compose 项目名一致，确保服务继续使用原来的卷。
+
+Compose 使用只读根文件系统、可写临时文件系统、移除 capabilities、禁止提权和日志轮转；认证命令与服务使用相同的数据卷和限制。`XDG_CACHE_HOME` 指向 `/data/cache`，使 VSCode 设备 ID 保存在可写数据卷上；否则只读根文件系统会导致每次重建容器都生成临时设备 ID。
 
 ## 已有 bind mount 部署
 
@@ -32,7 +56,9 @@ docker compose -f docker-compose.yaml -f docker-compose.bind.yaml run --rm copil
 docker compose -f docker-compose.yaml -f docker-compose.bind.yaml up -d --no-build
 ```
 
-先构建新镜像，或显式拉取兼容的仓库镜像。后续所有命令（包括认证）都使用相同覆盖配置和 Compose 项目名。`auth keys --list` 会显示 Key，请私下执行。覆盖配置默认使用 `./copilot-data`，拒绝自动创建不存在的目录，避免路径拼错后用空数据启动。保留已有 Token、代理及端口绑定设置，不要覆盖现有环境文件。
+这些命令将 `COPILOT_API_DATA_DIR` 指定的宿主机目录映射到容器内的 `/data`；未设置该变量时，覆盖配置默认将 `./copilot-data` 映射到 `/data`。GitHub 认证数据、provider 配置和其他 gateway 状态仍保存在这个宿主机目录中，而不是迁移到命名卷。
+
+先构建新镜像，或显式拉取兼容的仓库镜像。后续所有命令（包括认证）都使用相同覆盖配置和 Compose 项目名。`auth keys --list` 会显示 Key，请私下执行。覆盖配置拒绝自动创建不存在的目录，避免路径拼错后用空数据启动。保留已有 Token、代理及端口绑定设置，不要覆盖现有环境文件。
 
 ## 旧 root 镜像或旧路径迁移
 

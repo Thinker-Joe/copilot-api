@@ -1,25 +1,49 @@
 # Docker deployment
 
-The image runs as the unprivileged `bun` user, keeps persistent state in `/data`, and keeps application code root-owned. Compose publishes the host port on `127.0.0.1` by default. A gateway API key is still required because the server listens on `0.0.0.0` inside the container; a GitHub token does not replace it.
+The image runs as the unprivileged `bun` user and keeps application code root-owned. GitHub authentication data, provider configuration, and other persistent gateway state belong in `/data`. Mount persistent storage there so this data survives container recreation.
+
+The server listens on `0.0.0.0:4141` inside the container so Docker port publishing works. Compose publishes that port only on the host's `127.0.0.1` by default. The non-loopback listener requires a gateway API key and restricts CORS to the request's own origin; a GitHub token does not replace the gateway key.
 
 ## New installation
 
-From the repository root:
+The following Compose steps are for a new installation. For an existing deployment, first read [Existing bind mounts](#existing-bind-mounts) and [Root-image or old-path migration](#root-image-or-old-path-migration). For a minimal setup without Compose, see the [direct Docker commands](../README.md#run-directly-with-docker).
+
+From the repository root, create `.env` only if you do not already have one, build the image, and configure a strong gateway key for your API clients:
 
 ```sh
 cp .env.example .env
 docker compose build
 docker compose run --rm copilot-api auth keys --add YOUR_GATEWAY_API_KEY
+```
+
+Choose one way to configure your upstream service. To sign in interactively or configure a provider:
+
+```sh
 docker compose run --rm copilot-api auth login
+```
+
+Alternatively, if you already have a GitHub token, skip that command and edit `.env`:
+
+```dotenv
+COPILOT_API_GITHUB_TOKEN=your_github_token_here
+```
+
+`COPILOT_API_GITHUB_TOKEN` takes precedence over the legacy `GH_TOKEN` fallback. Both supply upstream credentials, not a gateway API key. Protect `.env` with appropriate host permissions and keep it out of version control. The key passed to `auth keys --add` can appear in shell history and the process list: initialize it only on a trusted host, and never paste real keys into issues or logs.
+
+Once credentials are configured, start the service:
+
+```sh
 docker compose up -d --no-build
 docker compose ps
 ```
 
-Choose a strong gateway key. The CLI key argument can appear in shell history and the process list: initialize it only on a trusted host. Never paste real keys into issues or logs. Login is interactive; alternatively set `COPILOT_API_GITHUB_TOKEN` in your untracked `.env`. It takes precedence over legacy `GH_TOKEN`. Avoid putting tokens on the command line and protect environment files with appropriate host permissions.
+Connect your API client to `http://127.0.0.1:4141` and use the gateway key configured above.
 
-The default `copilot-api:local` image is built from this checkout. To use a published image that supports this deployment contract, set `COPILOT_API_IMAGE` to its version tag or digest, then run `docker compose pull` and `docker compose up -d --no-build`. Do not assume older images support `/data` or this entrypoint.
+The default `copilot-api:local` image is built from this checkout. Releases published before this change run as root and use the legacy `/root/.local/share/copilot-api` layout, so they do not provide this deployment contract; paired with this Compose file they would still run as root and populate `/data` with root-owned files. Once a release includes this contract, set `COPILOT_API_IMAGE` to that version tag or digest, then run `docker compose pull` and `docker compose up -d --no-build`.
 
-The project-scoped `copilot-api-data` named volume survives container recreation and `docker compose down`. **Do not use `docker compose down -v` unless intentionally deleting your data.** Keep the same Compose project name when upgrading. Compose uses a read-only root filesystem, a writable temporary filesystem, dropped capabilities, no-new-privileges, and bounded logs. Authentication commands use the same volume and restrictions as the server. `XDG_CACHE_HOME` points at `/data/cache` so the VSCode device ID persists on the writable volume; without it, the read-only root filesystem forces an ephemeral device ID on every container recreation.
+Compose mounts its project-scoped `copilot-api-data` named volume at `/data`. This is Docker-managed storage, not the host's `./copilot-data` directory. The volume survives container recreation and `docker compose down`. **Do not use `docker compose down -v` unless intentionally deleting your data.** Keep the same Compose project name when upgrading so the service continues to use the same volume.
+
+Compose uses a read-only root filesystem, a writable temporary filesystem, dropped capabilities, no-new-privileges, and bounded logs. Authentication commands use the same volume and restrictions as the server. `XDG_CACHE_HOME` points at `/data/cache` so the VSCode device ID persists on the writable volume; without it, the read-only root filesystem forces an ephemeral device ID on every container recreation.
 
 ## Existing bind mounts
 
@@ -32,7 +56,9 @@ docker compose -f docker-compose.yaml -f docker-compose.bind.yaml run --rm copil
 docker compose -f docker-compose.yaml -f docker-compose.bind.yaml up -d --no-build
 ```
 
-Build the new image first, or explicitly pull a compatible registry image. Use the same override and Compose project name for all subsequent commands, including authentication. `auth keys --list` displays keys: run it privately. The override defaults to `./copilot-data` and refuses to auto-create a missing directory, catching path typos instead of silently starting with empty state. Preserve your existing token, proxy and host-binding settings; do not overwrite an existing environment file.
+These commands map the host directory selected by `COPILOT_API_DATA_DIR` to `/data` inside the container. If that variable is unset, the override maps `./copilot-data` to `/data`. GitHub authentication data, provider configuration, and other gateway state stay in that host directory, rather than moving to a named volume.
+
+Build the new image first, or explicitly pull a compatible registry image. Use the same override and Compose project name for all subsequent commands, including authentication. `auth keys --list` displays keys: run it privately. The override refuses to auto-create a missing directory, catching path typos instead of silently starting with empty state. Preserve your existing token, proxy and host-binding settings; do not overwrite an existing environment file.
 
 ## Root-image or old-path migration
 
