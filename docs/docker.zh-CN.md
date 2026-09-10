@@ -64,7 +64,7 @@ sudo chmod 700 "$DATA_DIR"
 ## 端口、代理和健康检查
 
 - 宿主机端口发布使用 `COPILOT_API_BIND` 和 `COPILOT_API_PORT`；容器内始终监听固定端口 4141，健康检查探测 `127.0.0.1:4141`。只能修改宿主机端口映射：向容器传入 `--port` 会使探针失配，容器将报告不健康。
-- Compose 转发大小写 HTTP/HTTPS/ALL/NO 代理变量，优先使用非空大写值。Bun 内置 HTTP 客户端会直接读取这些变量，因此只靠容器环境即可完成代理。CLI 的 `--proxy-env` 和 `--no-proxy-env` 仅影响 Node 运行时，在本镜像中不起作用。支持 HTTP 代理不等于支持所有 SOCKS 配置。
+- Compose 转发大小写 HTTP/HTTPS/ALL/NO 代理变量，优先使用非空大写值。Bun 内置 HTTP 客户端会读取 `HTTP_PROXY`（用于 `http://` 目标）、`HTTPS_PROXY`（用于 `https://` 目标）和 `NO_PROXY`（用于排除），因此只靠容器环境即可代理应用流量。它**不读取** `ALL_PROXY`，只设置它不会代理 gateway 请求；该变量仅为容器内的其他工具转发。CLI 的 `--proxy-env` 和 `--no-proxy-env` 仅影响 Node 运行时，在本镜像中不起作用。支持 HTTP 代理不等于支持所有 SOCKS 配置。
 - 代理地址中的 `127.0.0.1` 指容器自身，不是宿主机。使用容器可达地址；Linux 上访问宿主机代理可能需要显式配置 `host-gateway` 映射。
 - 健康检查使用 `curl --noproxy '*'` 请求 `127.0.0.1:4141`，并限制连接及总耗时，因此已配置的代理不会拦截它。该检查仅验证本地存活，不验证 GitHub 凭据、provider 可用性或额度。Docker 健康状态本身不会重启不健康容器；`restart: unless-stopped` 针对进程退出生效。
 - 企业 CA 应以只读方式挂载可信证书包，并配置运行时 CA 输入。不要通过关闭证书验证来解决代理问题。

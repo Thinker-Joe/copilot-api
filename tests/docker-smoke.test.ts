@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
+import fs from "node:fs"
+import { fileURLToPath } from "node:url"
 
 const image = process.env.COPILOT_API_DOCKER_TEST_IMAGE
 const containers: Array<string> = []
@@ -17,6 +19,28 @@ const provider = {
   baseUrl: "http://127.0.0.1:9/v1",
   apiKey: "synthetic-provider-key",
   enabled: true,
+}
+
+/**
+ * Read the cache location from Compose so the test containers use the same
+ * environment as a Compose deployment instead of inventing the path. Fails
+ * loudly if Compose stops setting it, because the documented VSCode device ID
+ * persistence depends on that variable.
+ */
+let cacheHome: string | undefined
+function composeCacheHome(): string {
+  if (cacheHome === undefined) {
+    const compose = fs.readFileSync(
+      fileURLToPath(new URL("../docker-compose.yaml", import.meta.url)),
+      "utf8",
+    )
+    const match = /^\s*XDG_CACHE_HOME:\s*(\S+)\s*$/m.exec(compose)
+    if (!match) {
+      throw new Error("docker-compose.yaml must set XDG_CACHE_HOME")
+    }
+    cacheHome = match[1]
+  }
+  return cacheHome
 }
 
 function command(args: Array<string>, allowFailure = false) {
@@ -80,6 +104,7 @@ function startContainer(volume: string): string {
     "--health-start-period=1s",
     "--env=ALL_PROXY=http://127.0.0.1:9",
     "--env=NO_PROXY=",
+    "--env=XDG_CACHE_HOME=" + composeCacheHome(),
     image!,
   ])
   return container
@@ -111,7 +136,7 @@ afterEach(() => {
 })
 
 describe.skipIf(!image)("Docker lifecycle (opt-in)", () => {
-  test("bootstrap, hardened startup, proxy-safe health and recreation", async () => {
+  test("bootstrap, hardened startup, proxy-safe health, cache persistence and recreation", async () => {
     const volume = createVolume()
     command([
       "run",
@@ -135,6 +160,22 @@ describe.skipIf(!image)("Docker lifecycle (opt-in)", () => {
         "sh",
         "-c",
         "test ! -w /app/dist/main.js && test -w /data",
+      ]).code,
+    ).toBe(0)
+    // Cache-path persistence check, not a device-ID lifecycle test: this smoke
+    // run seeds a provider, so setupProviderMode returns before the startup path
+    // that calls getVSCodeDeviceId(). Writing to the documented path still proves
+    // the cache survives the read-only root filesystem and container recreation.
+    expect(composeCacheHome().startsWith("/data/")).toBe(true)
+    expect(
+      command([
+        "exec",
+        container,
+        "sh",
+        "-c",
+        'test "$XDG_CACHE_HOME" = '
+          + composeCacheHome()
+          + ' && mkdir -p "$XDG_CACHE_HOME/Microsoft/DeveloperTools" && printf cached > "$XDG_CACHE_HOME/Microsoft/DeveloperTools/deviceid"',
       ]).code,
     ).toBe(0)
     expect(
@@ -164,11 +205,10 @@ describe.skipIf(!image)("Docker lifecycle (opt-in)", () => {
       command([
         "exec",
         replacement,
-        "sh",
-        "-c",
-        "test -w /data && mkdir -p /data/cache && test -w /data/cache",
-      ]).code,
-    ).toBe(0)
+        "cat",
+        composeCacheHome() + "/Microsoft/DeveloperTools/deviceid",
+      ]).output,
+    ).toBe("cached")
     expect(
       command([
         "run",
