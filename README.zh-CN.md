@@ -1,5 +1,10 @@
 # Copilot API
 
+> [!IMPORTANT]
+> **本 fork 已归档，不再维护。** 它相对上游只增加了容器打包、测试与文档，fork 镜像也已停止发布。请改用上游：[github.com/caozhiyuan/copilot-api](https://github.com/caozhiyuan/copilot-api) 与 `ghcr.io/caozhiyuan/copilot-api`。
+>
+> 本仓库的 `docs/docker.md`、`README.md` 与 `README.zh-CN.md` 中描述的部署方式属于已停用的 fork 镜像方案（本地 `build: .`、fork 镜像标签、`/healthcheck.sh` 探测），仅作历史留存，请勿据此新建部署。
+
 <p align="center">
   <img src="docs/hero/copilot-api-hero.svg" alt="Copilot API - Universal AI Gateway" width="1600" />
 </p>

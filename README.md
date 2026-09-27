@@ -1,5 +1,10 @@
 # Copilot API
 
+> [!IMPORTANT]
+> **This fork is archived and is no longer maintained.** It only ever added container packaging, tests and documentation on top of upstream, and the fork images are no longer published. Use upstream — [github.com/caozhiyuan/copilot-api](https://github.com/caozhiyuan/copilot-api) and `ghcr.io/caozhiyuan/copilot-api` — instead.
+>
+> The deployment instructions in `docs/docker.md`, `README.md` and `README.zh-CN.md` here describe the retired fork-image setup (local `build: .`, fork image tags, the `/healthcheck.sh` probe). They are kept for historical reference only; do not follow them for a new deployment.
+
 <p align="center">
   <img src="docs/hero/copilot-api-hero.svg" alt="Copilot API - Universal AI Gateway" width="1600" />
 </p>
