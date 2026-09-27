@@ -37,6 +37,7 @@ import { createResponses as createCopilotResponses } from "~/services/copilot/cr
 
 import { handleResponsesViaMessages } from "./messages-handler"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
+import { getCodexTaskTitleModel } from "./task-title"
 import {
   applyResponsesApiContextManagement,
   compactInputByLatestCompaction,
@@ -82,6 +83,14 @@ export const handleResponses = async (c: Context) => {
     })
   }
 
+  const taskTitleModel = getCodexTaskTitleModel(
+    c.req.header("user-agent"),
+    payload.input,
+    "copilot",
+  )
+  if (taskTitleModel) payload.model = taskTitleModel
+  const publicModel = taskTitleModel ?? requestedModel
+
   debugJson(logger, "Responses request payload:", payload)
 
   const subagentMarker = getCodexResponsesSubagentMarker(c)
@@ -124,7 +133,7 @@ export const handleResponses = async (c: Context) => {
     filterReasoningForTransport(payload, true)
     return await handleResponsesViaMessages(c, {
       payload,
-      publicModel: requestedModel,
+      publicModel,
       targetModel: payload.model,
       subagentMarker,
       requestId,
@@ -376,7 +385,9 @@ const fillEmptyNamespaceDescriptions = (tools: unknown): void => {
 }
 
 const getIncomingResponsesSessionId = (c: Context): string | undefined =>
-  getTrimmedHeader(c, "session-id") ?? getTrimmedHeader(c, "x-session-id")
+  getTrimmedHeader(c, "session-id")
+  ?? getTrimmedHeader(c, "x-root-session-id")
+  ?? getTrimmedHeader(c, "x-session-id")
 
 const codexSubagentHeaderValues = new Set([
   "collab_spawn",

@@ -1,14 +1,15 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@jeffreycao/copilot-api",
-  "version": "2.5.2",
+  "version": "2.6.18",
   "description": "GitHub Copilot, OpenAI Codex, OpenCode Go, and third-party AI provider gateway with OpenAI and Anthropic API compatibility.",
   "keywords": [
     "github-copilot",
     "codex",
     "ai-gateway",
     "opencode",
-    "anthropic-compatible"
+    "anthropic-compatible",
+    "openai-responses"
   ],
   "homepage": "https://github.com/caozhiyuan/copilot-api",
   "bugs": "https://github.com/caozhiyuan/copilot-api/issues",
@@ -50,8 +51,7 @@
     "desktop/**/*": "eslint --config desktop/eslint.config.mjs --cache --fix"
   },
   "overrides": {
-    "@hono/node-server": "^1.19.15",
-    "rolldown": "1.0.0-rc.18"
+    "@hono/node-server": "^1.19.15"
   },
   "dependencies": {
     "@azure/identity": "^4.13.2",
@@ -74,6 +74,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.37.0",
+    "@opencode-ai/models": "0.0.85",
     "@types/bun": "^1.2.23",
     "@types/proxy-from-env": "^1.0.4",
     "@types/winreg": "^1.2.36",
@@ -89,11 +90,11 @@
     "prettier": "^3.6.2",
     "prettier-plugin-packagejson": "^2.5.19",
     "simple-git-hooks": "^2.13.1",
-    "tsdown": "^0.15.6",
+    "tsdown": "^0.23.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.41.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13.0"
   }
 }

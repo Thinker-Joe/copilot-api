@@ -17,6 +17,9 @@ services:
     environment:
       PORT: 4141
       COPILOT_API_HOME: /data
+      COPILOT_API_SQLITE_DB_PATH: ${COPILOT_API_SQLITE_DB_PATH:-/data/copilot-api.sqlite}
+      COPILOT_API_ENTERPRISE_URL: ${COPILOT_API_ENTERPRISE_URL:-}
+      COPILOT_API_OAUTH_APP: ${COPILOT_API_OAUTH_APP:-}
       # The device-id cache must live on the writable volume under a read-only
       # root filesystem; $HOME/.cache is not writable in that mode.
       XDG_CACHE_HOME: /data/cache

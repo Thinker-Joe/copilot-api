@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { Hono } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
+import { installModelsDevCatalog } from "~/lib/models-dev-cache"
 import type { ModelsResponse } from "~/lib/types/models"
 import bundledCodexCatalogJson from "~/routes/models/models.json"
+
+import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
 
 const actualConfigModule = await import("~/lib/config")
 const actualTokenModule = await import("~/lib/token")
@@ -87,6 +90,7 @@ const bundledCodexModels = (
   }
 ).models
 const bundledCodexSlugs = bundledCodexModels.map((model) => model.slug)
+const CODEX_CATALOG_ETAG = 'W/"catalog-1"'
 
 let codexCatalogModels: Array<Record<string, unknown>> =
   createDefaultCodexCatalogModels()
@@ -99,9 +103,10 @@ const fetchMock = mock((url: string | URL | Request, _init?: RequestInit) => {
 
   if (requestUrl.startsWith("https://chatgpt.com/backend-api/codex/models")) {
     return Promise.resolve(
-      Response.json({
-        models: codexCatalogModels,
-      }),
+      Response.json(
+        { models: codexCatalogModels },
+        { headers: { ETag: CODEX_CATALOG_ETAG } },
+      ),
     )
   }
 
@@ -137,6 +142,32 @@ const fetchMock = mock((url: string | URL | Request, _init?: RequestInit) => {
             max_output_tokens: 8_000,
             name: "DeepSeek V4 Pro",
             object: "model",
+          },
+        ],
+      }),
+    )
+  }
+
+  if (requestUrl === "https://openrouter.example/v1/models") {
+    return Promise.resolve(
+      Response.json({
+        data: [
+          {
+            architecture: {
+              input_modalities: ["file", "image", "text"],
+              modality: "text+image+file->text",
+              output_modalities: ["text"],
+            },
+            canonical_slug: "openai/gpt-5.1-codex-20251113",
+            context_length: 400_000,
+            description: "Codex-optimized GPT model.",
+            id: "openai/gpt-5.1-codex",
+            name: "OpenAI: GPT-5.1-Codex",
+            supported_parameters: ["include_reasoning", "reasoning", "tools"],
+            top_provider: {
+              context_length: 400_000,
+              max_completion_tokens: 128_000,
+            },
           },
         ],
       }),
@@ -198,6 +229,7 @@ function createApp() {
 }
 
 beforeEach(() => {
+  installModelsDevCatalog(modelsDevCatalogFixture)
   enabledProviders = []
   providerConfigs = {}
   codexSetupError = null
@@ -271,7 +303,7 @@ describe("model routes", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  test("falls back to pricing models for each failed provider models request", async () => {
+  test("uses the models.dev catalog for OpenCode Go when other providers fail", async () => {
     enabledProviders = ["deepseek", "kimi", "opencode-go"]
     providerConfigs = {
       deepseek: createProviderConfig("deepseek", "https://bad.example"),
@@ -289,20 +321,51 @@ describe("model routes", () => {
       data: Array<Record<string, unknown> & { id: string }>
     }
     const modelIds = body.data.map((model) => model.id)
-    expect(modelIds).toContain("deepseek/deepseek-v4-flash")
+    expect(modelIds).toContain("deepseek/deepseek-flash")
     expect(modelIds).toContain("deepseek/deepseek-v4-pro")
     expect(modelIds).toContain("kimi/k3")
     expect(modelIds).toContain("kimi/k3-256k")
-    expect(modelIds).toContain("opencode-go/hy3")
-    expect(modelIds).toContain("opencode-go/gpt-5.6-luna")
+    expect(modelIds).toContain("opencode-go/gpt-6-luna")
+    expect(modelIds).not.toContain("opencode-go/grok-4.5")
     expect(
-      body.data.find((model) => model.id === "deepseek/deepseek-v4-flash"),
+      body.data.find((model) => model.id === "deepseek/deepseek-flash"),
     ).toMatchObject({
-      display_name: "deepseek-v4-flash",
+      display_name: "deepseek-flash",
       object: "model",
       owned_by: "deepseek",
     })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  test("serves OpenCode Go provider models from models.dev without upstream fetch", async () => {
+    providerConfigs = {
+      "opencode-go": createProviderConfig(
+        "opencode-go",
+        "https://opencode.example",
+      ),
+    }
+
+    const response = await createApp().request("/opencode-go/v1/models")
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      object: string
+      data: Array<Record<string, unknown> & { id: string }>
+    }
+    expect(body.object).toBe("list")
+    const modelIds = body.data.map((model) => model.id)
+    expect(modelIds).toEqual([...modelIds].sort())
+    expect(
+      body.data.find((model) => model.id === "glm-5.3-flash"),
+    ).toMatchObject({
+      name: "GLM-5.3-Flash",
+      context_window: 1_000_000,
+      max_output_tokens: 131_072,
+      input_modalities: ["text", "image"],
+      reasoning_efforts: ["low", "high", "max"],
+    })
+    expect(body.data.map((model) => model.id)).not.toContain("grok-4.5")
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 
   test("ignores providers whose models fetch rejects when merging the Codex catalog", async () => {
@@ -320,6 +383,7 @@ describe("model routes", () => {
     })
 
     expect(response.status).toBe(200)
+    expect(response.headers.get("etag")).toBeNull()
     const body = (await response.json()) as {
       models: Array<Record<string, unknown> & { slug: string }>
     }
@@ -349,16 +413,15 @@ describe("model routes", () => {
       models: Array<Record<string, unknown> & { slug: string }>
     }
     const modelSlugs = body.models.map((model) => model.slug)
-    expect(modelSlugs).toContain("deepseek/deepseek-v4-flash")
+    expect(modelSlugs).toContain("deepseek/deepseek-flash")
     expect(modelSlugs).toContain("kimi/k3")
-    expect(modelSlugs).toContain("opencode-go/hy3")
     expect(modelSlugs).toContain("opencode-go/qwen3.7-plus")
     expect(
-      body.models.find((model) => model.slug === "deepseek/deepseek-v4-flash"),
+      body.models.find((model) => model.slug === "deepseek/deepseek-flash"),
     ).toMatchObject({
       context_window: 1_000_000,
-      input_modalities: ["text"],
-      max_output_tokens: 64_000,
+      input_modalities: ["text", "image"],
+      max_output_tokens: 384_000,
       shell_type: "shell_command",
     })
     expect(body.models.find((model) => model.slug === "kimi/k3")).toMatchObject(
@@ -369,20 +432,13 @@ describe("model routes", () => {
       },
     )
     expect(
-      body.models.find((model) => model.slug === "opencode-go/hy3"),
-    ).toMatchObject({
-      context_window: 256_000,
-      input_modalities: ["text"],
-      max_output_tokens: 64_000,
-    })
-    expect(
       body.models.find((model) => model.slug === "opencode-go/qwen3.7-plus"),
     ).toMatchObject({
       context_window: 1_000_000,
       input_modalities: ["text", "image"],
       max_output_tokens: 64_000,
     })
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
   test("prefers user model config over upstream and built-in defaults", async () => {
@@ -437,6 +493,36 @@ describe("model routes", () => {
       context_window: 128_000,
       input_modalities: ["text", "image"],
       max_output_tokens: 8_000,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  test("maps the OpenRouter image modality into Codex candidates", async () => {
+    enabledProviders = ["openrouter"]
+    providerConfigs = {
+      openrouter: {
+        apiKey: "openrouter-key",
+        authType: "authorization",
+        baseUrl: "https://openrouter.example",
+        name: "openrouter",
+        type: "anthropic",
+      },
+    }
+
+    const response = await createApp().request("/v1/models?client=codex", {
+      headers: { "user-agent": "codex-cli/1.0.0" },
+    })
+
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as {
+      models: Array<Record<string, unknown> & { slug: string }>
+    }
+    expect(
+      body.models.find(
+        (model) => model.slug === "openrouter/openai/gpt-5.1-codex",
+      ),
+    ).toMatchObject({
+      input_modalities: ["image", "text"],
     })
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
@@ -504,6 +590,7 @@ describe("model routes", () => {
     })
 
     expect(response.status).toBe(200)
+    expect(response.headers.get("etag")).toBe(CODEX_CATALOG_ETAG)
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "https://chatgpt.com/backend-api/codex/models?client=codex",
@@ -536,6 +623,8 @@ describe("model routes", () => {
     })
 
     expect(response.status).toBe(200)
+    expect(response.headers.get("etag")).toBe(CODEX_CATALOG_ETAG)
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
     const body = (await response.json()) as {
       models: Array<Record<string, unknown> & { slug: string }>
     }
@@ -746,7 +835,7 @@ describe("model routes", () => {
       ...lunaCatalogModel,
       slug: "opencode-go/gpt-5.6-luna",
       display_name: "opencode-go GPT-5.6 Luna",
-      priority: 3_000,
+      priority: expect.any(Number),
     })
     expect(
       body.models.find((model) => model.slug === "codex/gpt-remote-only"),
@@ -757,26 +846,13 @@ describe("model routes", () => {
       priority: 1_002,
     })
     expect(
-      body.models.find((model) => model.slug === "opencode-go/qwen3-coder"),
-    ).toMatchObject({ display_name: "Qwen3 Coder (opencode-go)" })
+      body.models.find((model) => model.slug === "opencode-go/qwen3.7-plus"),
+    ).toMatchObject({ display_name: "Qwen3.7 Plus (opencode-go)" })
     expect(
-      body.models.find((model) => model.slug === "opencode-go/grok-4.5"),
-    ).toMatchObject({
-      context_window: 500_000,
-      default_reasoning_level: "high",
-      display_name: "Grok 4.5 (opencode-go)",
-      input_modalities: ["text", "image"],
-      max_output_tokens: 64_000,
-      supported_reasoning_levels: [
-        { effort: "low", description: "low reasoning effort" },
-        { effort: "medium", description: "medium reasoning effort" },
-        { effort: "high", description: "high reasoning effort" },
-        { effort: "ultra", description: "ultra reasoning effort" },
-      ],
-    })
-    expect(body.models.map((model) => model.slug)).not.toContain(
-      "opencode-go/gpt-provider-only",
-    )
+      body.models.find(
+        (model) => model.slug === "opencode-go/gpt-provider-only",
+      ),
+    ).toMatchObject({ display_name: "GPT Provider Only (opencode-go)" })
   })
 
   test("orders merged Codex models as catalog, codex, copilot, opencode-go, then providers", async () => {
@@ -810,14 +886,22 @@ describe("model routes", () => {
     const body = (await response.json()) as {
       models: Array<Record<string, unknown> & { slug: string }>
     }
-    expect(body.models.map((model) => model.slug)).toEqual([
+    const slugs = body.models.map((model) => model.slug)
+    expect(slugs.slice(0, 3)).toEqual([
       "gpt-native",
       "codex/gpt-native",
       "claude-sonnet-4-6",
-      "opencode-go/grok-4.5",
-      "opencode-go/qwen3-coder",
-      "kimi/kimi-k2.5",
     ])
+    expect(slugs).toContain("opencode-go/grok-4.7")
+    expect(slugs).toContain("opencode-go/qwen3.7-plus")
+    expect(slugs).not.toContain("opencode-go/grok-4.5")
+    const kimiIndex = slugs.indexOf("kimi/kimi-k2.5")
+    expect(kimiIndex).toBe(slugs.length - 1)
+    expect(
+      slugs
+        .slice(3, kimiIndex)
+        .every((slug) => slug.startsWith("opencode-go/")),
+    ).toBe(true)
     const priorities = body.models.map((model) =>
       typeof model.priority === "number" ? model.priority : 0,
     )

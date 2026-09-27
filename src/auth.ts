@@ -15,6 +15,10 @@ import {
   type ProviderType,
 } from "./lib/config"
 import { loginCodex } from "./lib/oauth/codex"
+import {
+  loadModelsDevProviderOptions,
+  type ModelsDevProviderOption,
+} from "./lib/models-dev-cache"
 import { PATHS, ensurePaths } from "./lib/paths"
 import { getConfiguredApiKeys } from "./lib/request-auth"
 import {
@@ -23,9 +27,17 @@ import {
 } from "./lib/quick-providers"
 import { prompt } from "./lib/interactive-prompt"
 import { state } from "./lib/state"
-import { persistCodexCredentials, setupGitHubToken } from "./lib/token"
+import {
+  getCodexAccounts,
+  persistCodexCredentials,
+  removeCodexAccount,
+  selectCodexAccount,
+  setupGitHubToken,
+  type CodexAccountSummary,
+} from "./lib/token"
 
 interface RunAuthOptions {
+  alias?: string
   provider?: string
   verbose: boolean
   showToken: boolean
@@ -36,6 +48,10 @@ const authArgs = {
     type: "string",
     description:
       "Provider to log in with or configure (copilot, codex, opencode-go, kimi, deepseek, dashscope, openrouter, custom)",
+  },
+  alias: {
+    type: "string",
+    description: "Optional alias for a Codex account",
   },
   verbose: {
     alias: "v",
@@ -251,18 +267,22 @@ async function promptRequiredSecret(
   return normalizedValue
 }
 
-async function promptCustomProviderName(): Promise<string> {
-  const providerName = await promptRequiredText(
-    "Enter provider name",
-    "Provider name",
-  )
+async function promptCustomProviderName(defaultName?: string): Promise<string> {
+  const value = await prompt("Enter provider name", {
+    type: "text",
+    ...(defaultName ? { default: defaultName, initial: defaultName } : {}),
+  })
+  const providerName = (value || defaultName || "").trim()
   assertCustomProviderName(providerName)
   return providerName
 }
 
-async function promptCustomProviderType(): Promise<ProviderType> {
+async function promptCustomProviderType(
+  defaultType?: ProviderType,
+): Promise<ProviderType> {
   const providerType = await prompt("Select provider type", {
     type: "select",
+    initial: defaultType,
     options: SUPPORTED_PROVIDER_TYPES.map((type) => ({
       label: type,
       value: type,
@@ -277,6 +297,49 @@ async function promptCustomProviderType(): Promise<ProviderType> {
   }
 
   return providerType
+}
+
+async function promptModelsDevProvider(): Promise<
+  ModelsDevProviderOption | undefined
+> {
+  const source = await prompt("Choose custom provider source", {
+    type: "select",
+    options: [
+      { label: "Enter manually", value: "manual" },
+      { label: "Choose from models.dev", value: "models-dev" },
+    ],
+  })
+  if (source === "manual") return undefined
+  if (source !== "models-dev") throw new Error("No provider source selected")
+
+  const providers = await loadModelsDevProviderOptions()
+  const query = (
+    (await prompt("Search models.dev providers (blank to list all)", {
+      type: "text",
+    })) ?? ""
+  )
+    .trim()
+    .toLowerCase()
+  const matches = providers.filter(
+    (provider) =>
+      provider.id.toLowerCase().includes(query)
+      || provider.name.toLowerCase().includes(query),
+  )
+  if (matches.length === 0) {
+    throw new Error("No matching models.dev providers with a supported API URL")
+  }
+  const selectedId = await prompt("Select a models.dev provider", {
+    type: "select",
+    options: matches.map((provider) => ({
+      label: `${provider.name} (${provider.id}) — ${provider.type}`,
+      value: provider.id,
+    })),
+  })
+  const selectedProvider = matches.find(
+    (provider) => provider.id === selectedId,
+  )
+  if (!selectedProvider) throw new Error("No models.dev provider selected")
+  return selectedProvider
 }
 
 async function promptQuickProviderType(
@@ -377,12 +440,16 @@ function buildCustomProviderConfig(
     baseUrl: string
     pricingCurrency?: string
     type: ProviderType
+    modelsDevProviderId?: string
   },
 ): ProviderConfig {
   return {
     type: options.type,
     enabled: true,
     baseUrl: options.baseUrl,
+    ...(options.modelsDevProviderId && {
+      modelsDevProviderId: options.modelsDevProviderId,
+    }),
     apiKey: options.apiKey,
     ...(options.authType ? { authType: options.authType } : {}),
     pricingCurrency:
@@ -394,11 +461,15 @@ function buildCustomProviderConfig(
 }
 
 async function configureCustomProvider(): Promise<void> {
-  const providerName = await promptCustomProviderName()
-  const type = await promptCustomProviderType()
-  const baseUrl = normalizeProviderBaseUrl(
-    await promptRequiredText("Enter provider baseUrl", "baseUrl"),
-  )
+  const catalogProvider = await promptModelsDevProvider()
+  const providerName = await promptCustomProviderName(catalogProvider?.id)
+  const type = await promptCustomProviderType(catalogProvider?.type)
+  const baseUrl =
+    catalogProvider ?
+      await promptQuickProviderBaseUrl(catalogProvider.api)
+    : normalizeProviderBaseUrl(
+        await promptRequiredText("Enter provider baseUrl", "baseUrl"),
+      )
   if (!baseUrl) {
     throw new Error("baseUrl must be a non-empty string")
   }
@@ -413,6 +484,7 @@ async function configureCustomProvider(): Promise<void> {
       apiKey,
       authType,
       baseUrl,
+      modelsDevProviderId: catalogProvider?.id,
       type,
     }),
   )
@@ -454,7 +526,7 @@ async function configureQuickProvider(
   )
 }
 
-async function loginWithCodex(): Promise<void> {
+async function loginWithCodex(alias?: string): Promise<void> {
   const credentials = await loginCodex({
     onAuth(info) {
       consola.info("Open the following URL to authenticate with Codex:")
@@ -471,13 +543,24 @@ async function loginWithCodex(): Promise<void> {
     },
   })
 
-  await persistCodexCredentials(credentials, { enableProvider: true })
+  await persistCodexCredentials(credentials, {
+    activateAccount: true,
+    alias,
+    enableProvider: true,
+  })
   consola.success(
     `Codex provider config written to ${PATHS.CONFIG_PATH} and credentials written to ${PATHS.CODEX_CREDENTIAL_PATH}`,
   )
 }
 
-async function loginWithProvider(provider: AuthProviderName): Promise<void> {
+async function loginWithProvider(
+  provider: AuthProviderName,
+  alias?: string,
+): Promise<void> {
+  if (alias !== undefined && provider !== "codex") {
+    throw new Error("--alias is only supported with the codex provider")
+  }
+
   if (provider === "copilot") {
     await setupGitHubToken({ force: true })
     consola.success("GitHub token written to", PATHS.GITHUB_TOKEN_PATH)
@@ -485,7 +568,7 @@ async function loginWithProvider(provider: AuthProviderName): Promise<void> {
   }
 
   if (provider === "codex") {
-    await loginWithCodex()
+    await loginWithCodex(alias)
     return
   }
 
@@ -518,7 +601,86 @@ export async function runAuthLogin(options: RunAuthOptions): Promise<void> {
   const provider = await resolveProviderSelection(options.provider)
 
   consola.info(`Logging in with ${AUTH_PROVIDER_LABELS[provider]}`)
-  await loginWithProvider(provider)
+  await loginWithProvider(provider, options.alias)
+}
+
+const authCodexArgs = {
+  list: {
+    alias: "l",
+    type: "boolean",
+    default: false,
+    description: "List stored Codex accounts",
+  },
+  remove: {
+    alias: "r",
+    type: "string",
+    description:
+      "Remove a Codex account by alias or account id; the account in use cannot be removed",
+  },
+  use: {
+    alias: "u",
+    type: "string",
+    description: "Select a Codex account by alias or account id",
+  },
+} as const
+
+interface RunAuthCodexOptions {
+  list?: boolean
+  remove?: string
+  use?: string
+}
+
+function formatCodexAccountName(
+  account: Pick<CodexAccountSummary, "accountId" | "alias">,
+): string {
+  return account.alias ?
+      `${account.alias} (${account.accountId})`
+    : account.accountId
+}
+
+function formatCodexAccount(account: CodexAccountSummary): string {
+  return `${account.active ? "*" : "-"} ${formatCodexAccountName(account)}`
+}
+
+export async function runAuthCodex(
+  options: RunAuthCodexOptions,
+): Promise<void> {
+  await ensurePaths()
+
+  const operationCount = [
+    options.list === true,
+    options.use !== undefined,
+    options.remove !== undefined,
+  ].filter(Boolean).length
+  if (operationCount > 1) {
+    throw new Error("Use only one of --list, --use, or --remove per invocation")
+  }
+
+  if (options.use !== undefined) {
+    const account = await selectCodexAccount(options.use)
+    consola.success(`Selected Codex account ${formatCodexAccountName(account)}`)
+    consola.info("Restart the server to use the selected Codex account.")
+    return
+  }
+
+  if (options.remove !== undefined) {
+    const account = await removeCodexAccount(options.remove)
+    consola.success(`Removed Codex account ${formatCodexAccountName(account)}`)
+    return
+  }
+
+  const accounts = await getCodexAccounts()
+  if (accounts.length === 0) {
+    consola.info(
+      "No Codex accounts configured. Run `copilot-api auth login --provider codex` to add one.",
+    )
+    return
+  }
+
+  consola.info("Configured Codex accounts:")
+  for (const account of accounts) {
+    consola.info(formatCodexAccount(account))
+  }
 }
 
 const authKeysArgs = {
@@ -623,7 +785,7 @@ export async function runAuthKeys(options: RunAuthKeysOptions): Promise<void> {
   const currentKeys = getConfiguredApiKeys()
   if (currentKeys.length === 0) {
     consola.info(
-      "No API keys configured. Run `npx copilot-api auth keys --add <key>` to add one.",
+      "No API keys configured. Run `npx @jeffreycao/copilot-api@latest auth keys --add <key>` to add one.",
     )
     return
   }
@@ -642,6 +804,7 @@ const authLogin = defineCommand({
   args: authArgs,
   run({ args }) {
     return runAuthLogin({
+      alias: args.alias,
       provider: args.provider,
       verbose: args.verbose,
       showToken: args["show-token"],
@@ -665,6 +828,21 @@ const authKeys = defineCommand({
   },
 })
 
+const authCodex = defineCommand({
+  meta: {
+    name: "codex",
+    description: "List, select, or remove stored Codex accounts",
+  },
+  args: authCodexArgs,
+  run({ args }) {
+    return runAuthCodex({
+      list: args.list,
+      remove: args.remove,
+      use: args.use,
+    })
+  },
+})
+
 export const auth = defineCommand({
   meta: {
     name: "auth",
@@ -672,6 +850,7 @@ export const auth = defineCommand({
   },
   args: authArgs,
   subCommands: {
+    codex: authCodex,
     login: authLogin,
     keys: authKeys,
   },
@@ -681,6 +860,7 @@ export const auth = defineCommand({
     }
 
     return runAuthLogin({
+      alias: args.alias,
       provider: args.provider,
       verbose: args.verbose,
       showToken: args["show-token"],

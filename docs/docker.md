@@ -68,6 +68,7 @@ For rollback, stop the new service and restore the protected backup plus the old
 ## Ports, proxies and health
 
 - Host publication uses `COPILOT_API_BIND` and `COPILOT_API_PORT`. The Compose container port stays 4141. Do not change only the internal CLI port without updating the port mapping.
+- Compose forwards `COPILOT_API_SQLITE_DB_PATH` (default `/data/copilot-api.sqlite`), `COPILOT_API_ENTERPRISE_URL` and `COPILOT_API_OAUTH_APP`. Keep SQLite paths inside the writable `/data` volume. `COPILOT_API_ENTERPRISE_URL` and `COPILOT_API_OAUTH_APP` change the GitHub token file name (`ent_github_token`) and its subdirectory, so set them before the first `auth login` or move the existing token file when enabling them later.
 - With `docker run`, the CLI `--port`/`-p` overrides `PORT`; otherwise it defaults to 4141. The health probe reads the actual bound address, including IPv6 and dynamically allocated ports, from `COPILOT_API_HEALTHCHECK_FILE`. The image puts this file under `/tmp`, not in persistent data.
 - Proxy setup is enabled for server startup and can be disabled with `--no-proxy-env`. Compose forwards upper- or lower-case HTTP/HTTPS/ALL/NO proxy variables, preferring nonempty uppercase values. HTTP proxy support does not imply support for every SOCKS proxy configuration.
 - `127.0.0.1` in a proxy URL means the container itself, not the Docker host. Use an address reachable from the container. On Linux, an explicitly configured `host-gateway` mapping may be needed for a host proxy.

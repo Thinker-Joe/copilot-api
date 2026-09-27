@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import { ipcMain, shell, BrowserWindow } from 'electron'
 
 import { normalizeApiKeys } from '../../src/lib/request-auth'
+import { loadModelsDevProviderOptions } from '../../src/lib/models-dev-cache'
 import { PATHS } from '../../src/lib/paths'
 import {
   isValidServerHost,
@@ -20,9 +21,12 @@ import {
 import { tMain } from './i18n'
 import {
   configureProviderWithAuthStatus,
+  getDesktopCodexAccounts,
   getDesktopAuthStatus,
   getEnabledDesktopProviders,
   loginCodexForDesktop,
+  removeCodexAccountForDesktop,
+  selectCodexAccountForDesktop,
   shouldStartInProviderMode,
 } from './provider-auth'
 import {
@@ -41,6 +45,7 @@ import {
   writeServerKeysConfig,
 } from './server-auth-config'
 import type {
+  CodexLoginInput,
   DesktopAuthMode,
   DesktopProxySettings,
   DesktopSettings,
@@ -245,11 +250,44 @@ export function registerIpcHandlers(
   )
 
   ipcMain.handle(
+    'auth:get-models-dev-providers',
+    async () => await loadModelsDevProviderOptions(),
+  )
+
+  ipcMain.handle(
+    'auth:get-codex-accounts',
+    async () => await getDesktopCodexAccounts(),
+  )
+
+  ipcMain.handle(
+    'auth:switch-codex-account',
+    async (_event, accountId: string) => {
+      try {
+        return await selectCodexAccountForDesktop(accountId)
+      } catch (err) {
+        return { success: false, mode: 'none', error: (err as Error).message }
+      }
+    },
+  )
+
+  ipcMain.handle(
+    'auth:remove-codex-account',
+    async (_event, accountId: string) => {
+      try {
+        return await removeCodexAccountForDesktop(accountId)
+      } catch (err) {
+        return { success: false, mode: 'none', error: (err as Error).message }
+      }
+    },
+  )
+
+  ipcMain.handle(
     'auth:start-codex-login',
-    async (_event, callbackUrlOrCode?: string) => {
+    async (_event, input: CodexLoginInput = {}) => {
       try {
         return await loginCodexForDesktop({
-          callbackUrlOrCode,
+          alias: input.alias,
+          callbackUrlOrCode: input.callbackUrlOrCode,
           openUrl: (url) => shell.openExternal(url),
         })
       } catch (err) {
