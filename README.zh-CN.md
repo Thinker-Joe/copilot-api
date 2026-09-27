@@ -59,6 +59,49 @@ curl http://localhost:4141/v1/models
 > [!NOTE]
 > token usage 存储需要 Node.js >= 22.13.0 或 Bun。详见[通过 npx 使用](docs/guides/zh-CN/getting-started.md#using-with-npx)。
 
+### 用 Docker 运行
+
+已发布的镜像无需检出源码。把下面内容保存为 `docker-compose.yaml`：
+
+```yaml
+services:
+  copilot-api:
+    image: ghcr.io/caozhiyuan/copilot-api:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4141:4141"
+    environment:
+      COPILOT_API_GITHUB_TOKEN: ${COPILOT_API_GITHUB_TOKEN:-}
+    volumes:
+      - copilot-api-data:/data
+
+volumes:
+  copilot-api-data:
+```
+
+然后配置网关 API Key 并启动：
+
+```sh
+docker compose run --rm copilot-api --auth keys --add YOUR_GATEWAY_API_KEY
+COPILOT_API_GITHUB_TOKEN=YOUR_GITHUB_TOKEN docker compose up -d --wait
+```
+
+没有 Compose 文件时，等价的做法是：
+
+```sh
+docker volume create copilot-api-data
+docker run --rm -v copilot-api-data:/data ghcr.io/caozhiyuan/copilot-api:latest \
+  --auth keys --add YOUR_GATEWAY_API_KEY
+docker run -d --name copilot-api --restart unless-stopped \
+  -p 127.0.0.1:4141:4141 -v copilot-api-data:/data \
+  -e COPILOT_API_GITHUB_TOKEN=YOUR_GITHUB_TOKEN \
+  ghcr.io/caozhiyuan/copilot-api:latest
+```
+
+网关 API Key 必须在启动前写入，它保存在 `/data/config.json`，因此没有对应的环境变量，这也是需要先单独跑一次性容器的原因。首次启动同样需要 GitHub token：既没有 token 也没有已配置的 provider 时，容器会停在交互式 provider 选择提示上而不提供服务，`--wait` 也永远不会返回。
+
+服务就绪后 `docker ps` 会显示 `(healthy)`。从源码检出部署时所用的加固版本见本仓库的 [`docker-compose.yaml`](docker-compose.yaml)——只读根文件系统、丢弃全部 capabilities，并用 bind mount 配合 `data-init` 修复属主；[Docker](docs/guides/zh-CN/docker.md) 则涵盖持久化配置、自定义端口和已有数据升级。
+
 接下来可按你的客户端选择指南：[与 Claude Code 一起使用](docs/guides/zh-CN/claude-code.md#using-with-claude-code)、[与 OpenCode 一起使用](docs/guides/zh-CN/opencode.md#using-with-opencode)、[与 Codex 一起使用](docs/guides/zh-CN/codex.md#using-with-codex)，或通过 [Docker](docs/guides/zh-CN/docker.md#using-with-docker) 运行。
 
 <a id="compatibility"></a>

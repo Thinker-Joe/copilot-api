@@ -55,6 +55,49 @@ curl http://localhost:4141/v1/models
 > [!NOTE]
 > Token usage storage requires Node.js >= 22.13.0 or Bun. See [Using with npx](docs/guides/en/getting-started.md#using-with-npx) for details.
 
+### Run with Docker
+
+The published image needs no source checkout. Save this as `docker-compose.yaml`:
+
+```yaml
+services:
+  copilot-api:
+    image: ghcr.io/caozhiyuan/copilot-api:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4141:4141"
+    environment:
+      COPILOT_API_GITHUB_TOKEN: ${COPILOT_API_GITHUB_TOKEN:-}
+    volumes:
+      - copilot-api-data:/data
+
+volumes:
+  copilot-api-data:
+```
+
+Then configure the gateway API key and start it:
+
+```sh
+docker compose run --rm copilot-api --auth keys --add YOUR_GATEWAY_API_KEY
+COPILOT_API_GITHUB_TOKEN=YOUR_GITHUB_TOKEN docker compose up -d --wait
+```
+
+Without a Compose file, the same steps are:
+
+```sh
+docker volume create copilot-api-data
+docker run --rm -v copilot-api-data:/data ghcr.io/caozhiyuan/copilot-api:latest \
+  --auth keys --add YOUR_GATEWAY_API_KEY
+docker run -d --name copilot-api --restart unless-stopped \
+  -p 127.0.0.1:4141:4141 -v copilot-api-data:/data \
+  -e COPILOT_API_GITHUB_TOKEN=YOUR_GITHUB_TOKEN \
+  ghcr.io/caozhiyuan/copilot-api:latest
+```
+
+The gateway API key must exist before startup and is stored in `/data/config.json`, so it has no environment-variable equivalent — that is why it takes a separate one-off container. A GitHub token is required for the first start as well: with neither a token nor a configured provider, the container waits on an interactive provider prompt instead of serving, and `--wait` never returns.
+
+`docker ps` reports `(healthy)` once the server is up. The repository's own [`docker-compose.yaml`](docker-compose.yaml) is the hardened variant used when deploying from a checkout — read-only root filesystem, dropped capabilities, and a bind mount with a `data-init` ownership repair — while [Docker](docs/guides/en/docker.md) covers persistent configuration, custom ports and upgrading existing data.
+
 From here, jump to the guide for your client: [Claude Code](docs/guides/en/claude-code.md#using-with-claude-code), [OpenCode](docs/guides/en/opencode.md#using-with-opencode), [Codex](docs/guides/en/codex.md#using-with-codex), or run it with [Docker](docs/guides/en/docker.md#using-with-docker).
 
 ## Compatibility
