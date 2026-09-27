@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { randomUUID } from "node:crypto"
 
+import { modelsDevCatalogFixture } from "./fixtures/models-dev-catalog"
+
 const image = process.env.COPILOT_API_DOCKER_TEST_IMAGE
 const containers: Array<string> = []
 const volumes: Array<string> = []
@@ -66,6 +68,24 @@ function seedProvider(volume: string): void {
   )
 }
 
+// Startup treats the initial models.dev catalog fetch as required when no disk
+// cache exists, which cannot succeed inside this network-isolated container.
+// Seed the cache the way any deployment that has already started once would
+// have it, so the smoke test still exercises a real hardened start offline.
+function seedModelsDevCache(volume: string): void {
+  runScript(
+    volume,
+    [
+      'import fs from "node:fs";',
+      "fs.writeFileSync(",
+      '  "/data/models-dev-api.json",',
+      "  " + JSON.stringify(JSON.stringify(modelsDevCatalogFixture)) + ",",
+      "  { mode: 0o600 },",
+      ");",
+    ].join("\n"),
+  )
+}
+
 function startContainer(volume: string, args: Array<string> = []): string {
   const container = "copilot-review-" + randomUUID()
   containers.push(container)
@@ -127,6 +147,7 @@ describe.skipIf(!image)("Docker lifecycle (opt-in)", () => {
       "synthetic-gateway-key",
     ])
     seedProvider(volume)
+    seedModelsDevCache(volume)
     const container = startContainer(volume, ["--port", "9090"])
     await waitHealthy(container)
     expect(command(["exec", container, "id", "-u"]).output).not.toBe("0")

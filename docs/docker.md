@@ -75,6 +75,12 @@ For rollback, stop the new service and restore the protected backup plus the old
 - The health check bypasses all proxy variables and uses bounded timeouts. It is a local liveness probe, not a check of GitHub credentials, provider availability or remaining quota. Docker health status alone does not restart an unhealthy container; `restart: unless-stopped` responds to process exit.
 - For a corporate CA, mount the trusted CA bundle read-only and configure the runtime's CA input appropriately. Never disable certificate verification to make a proxy work.
 
+## Outbound access at startup
+
+Since upstream v2.6.12 the server loads its OpenCode Go model catalog from `https://models.dev/api.json`. On a start where no catalog is cached yet — a fresh volume, or the first start after upgrading an older deployment — that request is **required**, and the server exits instead of starting when it fails. Network-isolated or egress-filtered hosts must therefore either allow `models.dev` or pre-seed `/data/models-dev-api.json` with a valid models.dev response before the first start.
+
+Once a catalog exists on disk the refresh is best-effort: an unreachable `models.dev` only logs a warning and the cached catalog keeps working. The `data-init`-style ownership repair is not needed here because Compose uses the named `copilot-api-data` volume, which is created from the image's own `/data` (owned by `bun:bun`, mode `700`).
+
 ## Release contract and tests
 
 Stable releases keep the original `vX.Y.Z`, `vX.Y` and `vX` tags, plus unprefixed aliases. Prereleases do not update stable rolling aliases. Branch tags and full commit-SHA tags are also published. In the release channel, stable releases own `latest`; in the dev channel, only the dev branch does. Concurrency is scoped to each Git ref so publishing one version does not cancel another version. Package-write permission is confined to publishing, never PR validation. Deploy a version tag or digest when a moving alias is inappropriate.
